@@ -1,3 +1,6 @@
+// Package oauth declares the OAuth client, and things related to them, from
+// the certification of the flagship app to the creation of the access codes in
+// the OAuth2 flow.
 package oauth
 
 import (
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
+	"github.com/cozy/cozy-stack/model/feature"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/model/notification"
@@ -21,9 +25,10 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb/mango"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/metadata"
+	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/registry"
 
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -99,11 +104,6 @@ type Client struct {
 	Flagship            bool `json:"flagship,omitempty"`
 	CertifiedFromStore  bool `json:"certified_from_store,omitempty"`
 	CreatedAtOnboarding bool `json:"created_at_onboarding,omitempty"`
-
-	OnboardingSecret      string `json:"onboarding_secret,omitempty"`
-	OnboardingApp         string `json:"onboarding_app,omitempty"`
-	OnboardingPermissions string `json:"onboarding_permissions,omitempty"`
-	OnboardingState       string `json:"onboarding_state,omitempty"`
 
 	Metadata *metadata.CozyMetadata `json:"cozyMetadata,omitempty"`
 }
@@ -192,6 +192,27 @@ func GetNotifiables(i *instance.Instance) ([]*Client, error) {
 	// can have no cozyMetadata
 	SortClientsByCreatedAtDesc(clients)
 	return clients, nil
+}
+
+func GetConnectedUserClients(i *instance.Instance, limit int, bookmark string) ([]*Client, string, error) {
+	// Return clients with client_kind mobile, browser and desktop
+	var clients []*Client
+	req := &couchdb.FindRequest{
+		UseIndex: "connected-user-clients",
+		Selector: mango.And(mango.Gt("client_kind", ""), mango.Gt("client_name", "")),
+		Bookmark: bookmark,
+		Limit:    limit,
+	}
+	res, err := couchdb.FindDocsRaw(i, consts.OAuthClients, req, &clients)
+	if err != nil {
+		return nil, "", err
+	}
+
+	for _, client := range clients {
+		client.ClientSecret = ""
+	}
+
+	return clients, res.Bookmark, nil
 }
 
 func SortClientsByCreatedAtDesc(clients []*Client) {
@@ -376,15 +397,7 @@ func hasOptions(needle CreateOptions, haystack []CreateOptions) bool {
 	return false
 }
 
-// Create is a function that sets some fields, and then save it in Couch.
-func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegistrationError {
-	if err := c.checkMandatoryFields(i); err != nil {
-		return err
-	}
-	if err := c.CheckSoftwareID(i); err != nil {
-		return err
-	}
-
+func (c *Client) ensureClientNameUnicity(i *instance.Instance) error {
 	var results []*Client
 	req := &couchdb.FindRequest{
 		UseIndex: "by-client-name",
@@ -395,10 +408,7 @@ func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegi
 	if err != nil && !couchdb.IsNoDatabaseError(err) {
 		i.Logger().WithNamespace("oauth").
 			Warnf("Cannot find clients by name: %s", err)
-		return &ClientRegistrationError{
-			Code:  http.StatusInternalServerError,
-			Error: "internal_server_error",
-		}
+		return err
 	}
 
 	// Find the correct suffix to apply to the client name in case it is already
@@ -431,6 +441,25 @@ func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegi
 		c.ClientName = c.ClientName + "-" + suffix
 	}
 
+	return nil
+}
+
+// Create is a function that sets some fields, and then save it in Couch.
+func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegistrationError {
+	if err := c.checkMandatoryFields(i); err != nil {
+		return err
+	}
+	if err := c.CheckSoftwareID(i); err != nil {
+		return err
+	}
+
+	if err := c.ensureClientNameUnicity(i); err != nil {
+		return &ClientRegistrationError{
+			Code:  http.StatusInternalServerError,
+			Error: "internal_server_error",
+		}
+	}
+
 	if !hasOptions(NotPending, opts) {
 		c.Pending = true
 	}
@@ -453,7 +482,7 @@ func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegi
 	md.DocTypeVersion = DocTypeVersion
 	c.Metadata = md
 
-	if err = couchdb.CreateDoc(i, c); err != nil {
+	if err := couchdb.CreateDoc(i, c); err != nil {
 		i.Logger().WithNamespace("oauth").
 			Warnf("Cannot create client: %s", err)
 		return &ClientRegistrationError{
@@ -469,10 +498,11 @@ func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegi
 		}
 	}
 
-	c.RegistrationToken, err = crypto.NewJWT(i.OAuthSecret, crypto.StandardClaims{
-		Audience: consts.RegistrationTokenAudience,
+	var err error
+	c.RegistrationToken, err = crypto.NewJWT(i.OAuthSecret, jwt.RegisteredClaims{
+		Audience: jwt.ClaimStrings{consts.RegistrationTokenAudience},
 		Issuer:   i.Domain,
-		IssuedAt: time.Now().Unix(),
+		IssuedAt: jwt.NewNumericDate(time.Now()),
 		Subject:  c.CouchID,
 	})
 	if err != nil {
@@ -485,6 +515,25 @@ func (c *Client) Create(i *instance.Instance, opts ...CreateOptions) *ClientRegi
 	}
 
 	c.TransformIDAndRev()
+
+	if !c.Pending {
+		flags, err := feature.GetFlags(i)
+		if err != nil {
+			i.Logger().WithNamespace("oauth").
+				Errorf("Failed to get the OAuth clients limit: %s", err)
+			return nil
+		}
+
+		limit := -1
+		if clientsLimit, ok := flags.M["cozy.oauthclients.max"].(float64); ok && clientsLimit >= 0 {
+			limit = int(clientsLimit)
+		}
+		_, exceeded := CheckOAuthClientsLimitReached(i, limit)
+		if exceeded {
+			PushClientsLimitAlert(i, c.ClientName, limit)
+		}
+		return nil
+	}
 	return nil
 }
 
@@ -532,17 +581,21 @@ func (c *Client) Update(i *instance.Instance, old *Client) *ClientRegistrationEr
 
 	c.CouchID = old.CouchID
 	c.CouchRev = old.CouchRev
-	c.ClientName = old.ClientName
 	c.ClientID = ""
 	c.SecretExpiresAt = 0
 	c.RegistrationToken = ""
 	c.GrantTypes = []string{"authorization_code", "refresh_token"}
 	c.ResponseTypes = []string{"code"}
 	c.AllowLoginScope = old.AllowLoginScope
-	c.OnboardingSecret = ""
-	c.OnboardingApp = ""
-	c.OnboardingPermissions = ""
-	c.OnboardingState = ""
+
+	if c.ClientName != old.ClientName {
+		if err := c.ensureClientNameUnicity(i); err != nil {
+			return &ClientRegistrationError{
+				Code:  http.StatusInternalServerError,
+				Error: "internal_server_error",
+			}
+		}
+	}
 
 	c.Flagship = old.Flagship
 	c.CertifiedFromStore = old.CertifiedFromStore
@@ -587,6 +640,29 @@ func (c *Client) Delete(i *instance.Instance) *ClientRegistrationError {
 			Error: "internal_server_error",
 		}
 	}
+
+	var last *time.Time
+	if at, ok := c.LastRefreshedAt.(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+			last = &t
+		}
+	}
+	if at, ok := c.SynchronizedAt.(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+			if last == nil || last.Before(t) {
+				last = &t
+			}
+		}
+	}
+	if last != nil {
+		if i.LastActivityFromDeletedOAuthClients == nil || i.LastActivityFromDeletedOAuthClients.Before(*last) {
+			i.LastActivityFromDeletedOAuthClients = last
+			if err := couchdb.UpdateDoc(prefixer.GlobalPrefixer, i); err != nil {
+				i.Logger().Warnf("Cannot update last activity for %q: %s", i.Domain, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -605,6 +681,7 @@ func (c *Client) CreateChallenge(inst *instance.Instance) (string, error) {
 // flagship app.
 type AttestationRequest struct {
 	Platform    string `json:"platform"`
+	Issuer      string `json:"issuer"`
 	Challenge   string `json:"challenge"`
 	Attestation string `json:"attestation"`
 	KeyID       []byte `json:"keyId"`
@@ -615,7 +692,11 @@ func (c *Client) Attest(inst *instance.Instance, req AttestationRequest) error {
 	var err error
 	switch req.Platform {
 	case "android":
-		err = c.checkAndroidAttestation(inst, req)
+		if req.Issuer == "playintegrity" {
+			err = c.checkPlayIntegrityAttestation(inst, req)
+		} else {
+			err = c.checkSafetyNetAttestation(inst, req)
+		}
 	case "ios":
 		err = c.checkAppleAttestation(inst, req)
 	default:
@@ -672,10 +753,10 @@ func (c *Client) AcceptRedirectURI(u string) bool {
 // CreateJWT returns a new JSON Web Token for the given instance and audience
 func (c *Client) CreateJWT(i *instance.Instance, audience, scope string) (string, error) {
 	token, err := crypto.NewJWT(i.OAuthSecret, permission.Claims{
-		StandardClaims: crypto.StandardClaims{
-			Audience: audience,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Audience: jwt.ClaimStrings{audience},
 			Issuer:   i.Domain,
-			IssuedAt: crypto.Timestamp(),
+			IssuedAt: jwt.NewNumericDate(time.Now()),
 			Subject:  c.CouchID,
 		},
 		Scope: scope,
@@ -706,9 +787,9 @@ func validToken(i *instance.Instance, audience, token string) (permission.Claims
 		return claims, false
 	}
 	// Note: the refresh and registration tokens don't expire, no need to check its issue date
-	if claims.Audience != audience {
+	if claims.AudienceString() != audience {
 		i.Logger().WithNamespace("oauth").
-			Errorf("Unexpected audience for %s token: %s", audience, claims.Audience)
+			Errorf("Unexpected audience for %s token: %v", audience, claims.Audience)
 		return claims, false
 	}
 	if claims.Issuer != i.Domain {
@@ -774,6 +855,39 @@ func GetLinkedAppSlug(softwareID string) string {
 // BuildLinkedAppScope returns a formatted scope for a linked app
 func BuildLinkedAppScope(slug string) string {
 	return fmt.Sprintf("@%s/%s", consts.Apps, slug)
+}
+
+func CheckOAuthClientsLimitReached(i *instance.Instance, limit int) (reached, exceeded bool) {
+	if limit == -1 {
+		return
+	}
+
+	clients, _, err := GetConnectedUserClients(i, 100, "")
+	if err != nil {
+		i.Logger().Errorf("Could not fetch connected OAuth clients: %s", err)
+		return
+	}
+	count := len(clients)
+
+	reached = count >= limit
+	exceeded = count > limit
+	return
+}
+
+var cbClientsLimitAlert func(i *instance.Instance, clientName string, clientsLimit int)
+
+// RegisterClientsLimitAlertCallback allows to register a callback function
+// called when the connected OAuth clients limit (if present) is exceeded.
+func RegisterClientsLimitAlertCallback(cb func(i *instance.Instance, clientName string, clientsLimit int)) {
+	cbClientsLimitAlert = cb
+}
+
+// PushClientsLimitAlert can be used to notify when the connected OAuth clients
+// limit (if present) is exceeded.
+func PushClientsLimitAlert(i *instance.Instance, clientName string, clientsLimit int) {
+	if cbClientsLimitAlert != nil {
+		cbClientsLimitAlert(i, clientName, clientsLimit)
+	}
 }
 
 var _ couchdb.Doc = &Client{}

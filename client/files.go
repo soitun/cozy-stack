@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cozy/cozy-stack/client/request"
@@ -39,18 +40,19 @@ type File struct {
 	ID    string `json:"id"`
 	Rev   string `json:"rev"`
 	Attrs struct {
-		Type       string    `json:"type"`
-		Name       string    `json:"name"`
-		DirID      string    `json:"dir_id"`
-		CreatedAt  time.Time `json:"created_at"`
-		UpdatedAt  time.Time `json:"updated_at"`
-		Size       int64     `json:"size,string"`
-		MD5Sum     []byte    `json:"md5sum"`
-		Mime       string    `json:"mime"`
-		Class      string    `json:"class"`
-		Executable bool      `json:"executable"`
-		Encrypted  bool      `json:"encrypted"`
-		Tags       []string  `json:"tags"`
+		Type       string                 `json:"type"`
+		Name       string                 `json:"name"`
+		DirID      string                 `json:"dir_id"`
+		CreatedAt  time.Time              `json:"created_at"`
+		UpdatedAt  time.Time              `json:"updated_at"`
+		Size       int64                  `json:"size,string"`
+		MD5Sum     []byte                 `json:"md5sum"`
+		Mime       string                 `json:"mime"`
+		Class      string                 `json:"class"`
+		Executable bool                   `json:"executable"`
+		Encrypted  bool                   `json:"encrypted"`
+		Tags       []string               `json:"tags"`
+		Metadata   map[string]interface{} `json:"metadata"`
 	} `json:"attributes"`
 }
 
@@ -59,13 +61,14 @@ type Dir struct {
 	ID    string `json:"id"`
 	Rev   string `json:"rev"`
 	Attrs struct {
-		Type      string    `json:"type"`
-		Name      string    `json:"name"`
-		DirID     string    `json:"dir_id"`
-		Fullpath  string    `json:"path"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Tags      []string  `json:"tags"`
+		Type      string                 `json:"type"`
+		Name      string                 `json:"name"`
+		DirID     string                 `json:"dir_id"`
+		Fullpath  string                 `json:"path"`
+		CreatedAt time.Time              `json:"created_at"`
+		UpdatedAt time.Time              `json:"updated_at"`
+		Tags      []string               `json:"tags"`
+		Metadata  map[string]interface{} `json:"metadata"`
 	} `json:"attributes"`
 }
 
@@ -353,6 +356,28 @@ func (c *Client) RestoreByPath(name string) error {
 		return err
 	}
 	return c.RestoreByID(doc.ID)
+}
+
+// PermanentDeleteByID is used to delete a file or directory specified by its
+// ID, not just putting it in the trash
+func (c *Client) PermanentDeleteByID(id string) error {
+	_, err := c.Req(&request.Options{
+		Method:     "PATCH",
+		Path:       "/files/" + url.PathEscape(id),
+		Body:       strings.NewReader(`{"data": {"attributes": {"permanent_delete": true}}}`),
+		NoResponse: true,
+	})
+	return err
+}
+
+// PermanentDeleteByPath is used to delete a file or directory specified by its
+// path, not just putting it in the trash
+func (c *Client) PermanentDeleteByPath(name string) error {
+	doc, err := c.GetDirOrFileByPath(name)
+	if err != nil {
+		return err
+	}
+	return c.PermanentDeleteByID(doc.ID)
 }
 
 // WalkFn is the function type used by the walk function.

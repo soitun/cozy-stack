@@ -1,15 +1,20 @@
 package middlewares
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/cozy/cozy-stack/model/feature"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/move"
+	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/pkg/assets"
+	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/net/idna"
@@ -65,8 +70,7 @@ func CheckInstanceDeleting(next echo.HandlerFunc) echo.HandlerFunc {
 func CheckInstanceBlocked(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		i := GetInstance(c)
-		pdoc, err := GetPermission(c)
-		if err == nil && pdoc.Type == permission.TypeCLI {
+		if _, ok := GetCLIPermission(c); ok {
 			return next(c)
 		}
 		if i.CheckInstanceBlocked() {
@@ -127,7 +131,8 @@ func handleBlockedInstance(c echo.Context, i *instance.Instance, next echo.Handl
 	if url, _ := i.ManagerURL(instance.ManagerBlockedURL); url != "" && IsLoggedIn(c) {
 		switch contentType {
 		case jsonapi.ContentType, echo.MIMEApplicationJSON:
-			return c.JSON(returnCode, i.Warnings())
+			warnings := warningOrBlocked(i, returnCode)
+			return c.JSON(returnCode, warnings)
 		default:
 			return c.Redirect(http.StatusFound, url)
 		}
@@ -142,7 +147,8 @@ func handleBlockedInstance(c echo.Context, i *instance.Instance, next echo.Handl
 
 	switch contentType {
 	case jsonapi.ContentType, echo.MIMEApplicationJSON:
-		return c.JSON(returnCode, i.Warnings())
+		warnings := warningOrBlocked(i, returnCode)
+		return c.JSON(returnCode, warnings)
 	default:
 		return c.Render(returnCode, "instance_blocked.html", echo.Map{
 			"Domain":       i.ContextualDomain(),
@@ -156,23 +162,45 @@ func handleBlockedInstance(c echo.Context, i *instance.Instance, next echo.Handl
 	}
 }
 
+func warningOrBlocked(i *instance.Instance, returnCode int) []*jsonapi.Error {
+	warnings := ListWarnings(i)
+	if len(warnings) == 0 {
+		warnings = []*jsonapi.Error{
+			{
+				Status: returnCode,
+				Title:  "Blocked",
+				Code:   instance.BlockedUnknown.Code,
+				Detail: i.Translate(instance.BlockedUnknown.Message),
+			},
+		}
+	}
+	return warnings
+}
+
 // CheckOnboardingNotFinished checks if there is the instance needs to complete
 // its onboarding
 func CheckOnboardingNotFinished(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		i := GetInstance(c)
 		if !i.OnboardingFinished {
-			return c.Render(http.StatusOK, "need_onboarding.html", echo.Map{
-				"Domain":       i.ContextualDomain(),
-				"ContextName":  i.ContextName,
-				"Locale":       i.Locale,
-				"Title":        i.TemplateTitle(),
-				"Favicon":      Favicon(i),
-				"SupportEmail": i.SupportEmailAddress(),
-			})
+			return RenderNeedOnboarding(c, i)
 		}
 		return next(c)
 	}
+}
+
+// RenderNeedOnboarding renders the page that tells the user that they have to
+// confirm their email address and choose a password before using their Cozy.
+func RenderNeedOnboarding(c echo.Context, inst *instance.Instance) error {
+	return c.Render(http.StatusOK, "need_onboarding.html", echo.Map{
+		"Domain":       inst.ContextualDomain(),
+		"ContextName":  inst.ContextName,
+		"Locale":       inst.Locale,
+		"Title":        inst.TemplateTitle(),
+		"Favicon":      Favicon(inst),
+		"SupportEmail": inst.SupportEmailAddress(),
+		"UUID":         inst.UUID,
+	})
 }
 
 // CheckTOSDeadlineExpired checks if there is not signed ToS and the deadline is
@@ -180,8 +208,7 @@ func CheckOnboardingNotFinished(next echo.HandlerFunc) echo.HandlerFunc {
 func CheckTOSDeadlineExpired(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		i := GetInstance(c)
-		pdoc, err := GetPermission(c)
-		if err == nil && pdoc.Type == permission.TypeCLI {
+		if _, ok := GetCLIPermission(c); ok {
 			return next(c)
 		}
 
@@ -197,13 +224,48 @@ func CheckTOSDeadlineExpired(next echo.HandlerFunc) echo.HandlerFunc {
 		if notSigned && deadline == instance.TOSBlocked {
 			switch AcceptedContentType(c) {
 			case jsonapi.ContentType, echo.MIMEApplicationJSON:
-				return c.JSON(http.StatusPaymentRequired, i.Warnings())
+				return c.JSON(http.StatusPaymentRequired, ListWarnings(i))
 			default:
 				return c.Redirect(http.StatusFound, redirect)
 			}
 		}
 		return next(c)
 	}
+}
+
+// CheckOAuthClientsLimitExceeded checks if there are more OAuth clients
+// connected by the user than what their plan allows
+func CheckOAuthClientsLimitExceeded(c echo.Context) (bool, error) {
+	i := GetInstance(c)
+	if _, ok := GetCLIPermission(c); ok {
+		return false, nil
+	}
+
+	slug := c.Get("slug").(string)
+	if slug == consts.SettingsSlug {
+		return false, nil
+	}
+
+	flags, err := feature.GetFlags(i)
+	if err != nil {
+		return true, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("Could not get flags: %w", err))
+	}
+
+	if clientsLimit, ok := flags.M["cozy.oauthclients.max"].(float64); ok && clientsLimit >= 0 {
+		_, exceeded := oauth.CheckOAuthClientsLimitReached(i, int(clientsLimit))
+		if exceeded {
+			reqURL := c.Request().URL
+			subdomain := i.SubDomain(slug)
+			subdomain.Path = reqURL.Path
+			subdomain.RawQuery = reqURL.RawQuery
+			subdomain.Fragment = reqURL.Fragment
+			q := url.Values{"redirect": {subdomain.String()}}
+
+			return true, c.Redirect(http.StatusSeeOther, i.PageURL("/settings/clients/limit-exceeded", q))
+		}
+	}
+
+	return false, nil
 }
 
 // GetInstance will return the instance linked to the given echo

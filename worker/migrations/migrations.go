@@ -62,7 +62,7 @@ type message struct {
 	Type string `json:"type"`
 }
 
-func worker(ctx *job.WorkerContext) error {
+func worker(ctx *job.TaskContext) error {
 	var msg message
 	if err := ctx.UnmarshalMessage(&msg); err != nil {
 		return err
@@ -87,7 +87,7 @@ func worker(ctx *job.WorkerContext) error {
 	}
 }
 
-func commit(ctx *job.WorkerContext, err error) error {
+func commit(ctx *job.TaskContext, err error) error {
 	var msg message
 	var migrationType string
 
@@ -113,7 +113,7 @@ func pushTrashJob(fs vfs.VFS) func(vfs.TrashJournal) error {
 }
 
 func removeUnwantedFolders(domain string) error {
-	inst, err := instance.GetFromCouch(domain)
+	inst, err := instance.Get(domain)
 	if err != nil {
 		return err
 	}
@@ -199,7 +199,7 @@ func removeUnwantedFolders(domain string) error {
 }
 
 func migrateNotesMimeType(domain string) error {
-	inst, err := instance.GetFromCouch(domain)
+	inst, err := instance.Get(domain)
 	if err != nil {
 		return err
 	}
@@ -234,7 +234,7 @@ func migrateNotesMimeType(domain string) error {
 
 func migrateToSwiftV3(domain string) error {
 	c := config.GetSwiftConnection()
-	inst, err := instance.GetFromCouch(domain)
+	inst, err := instance.Get(domain)
 	if err != nil {
 		return err
 	}
@@ -298,11 +298,11 @@ func migrateToSwiftV3(domain string) error {
 
 	meta := &swift.Metadata{"cozy-migrated-from": migratedFrom}
 	_ = c.ContainerUpdate(ctx, dstContainer, meta.ContainerHeaders())
-	if in, err := instance.GetFromCouch(domain); err == nil {
+	if in, err := instance.Get(domain); err == nil {
 		inst = in
 	}
 	inst.SwiftLayout = 2
-	if err = inst.Update(); err != nil {
+	if err = instance.Update(inst); err != nil {
 		return err
 	}
 

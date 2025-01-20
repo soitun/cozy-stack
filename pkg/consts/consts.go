@@ -1,3 +1,5 @@
+// Package consts is only for declaring some constants used by the stack, like
+// some slugs, IDs, doctypes, etc.
 package consts
 
 const (
@@ -16,6 +18,12 @@ const (
 	// referencing a directory that contains the notes with collaborative
 	// edition.
 	NotesSlug = "notes"
+	// PassSlug is the slug of cozy-pass webapp, which is used by the stack for
+	// linking the bitwarden OAuth clients.
+	PassSlug = "passwords"
+	// DataProxySlug is the slug of the dataproxy webapp, which is used for
+	// embedding a PouchDB in the client (used by the search for example).
+	DataProxySlug = "dataproxy"
 )
 
 const (
@@ -23,6 +31,8 @@ const (
 	BitwardenSettingsID = "io.cozy.settings.bitwarden"
 	// ContextSettingsID is the id of the settings JSON-API response for the context
 	ContextSettingsID = "io.cozy.settings.context"
+	// ClientsUsageID is the id of the settings JSON-API response for clients-usage
+	ClientsUsageID = "io.cozy.settings.clients-usage"
 	// DiskUsageID is the id of the settings JSON-API response for disk-usage
 	DiskUsageID = "io.cozy.settings.disk-usage"
 	// InstanceSettingsID is the id of settings document for the instance
@@ -30,6 +40,9 @@ const (
 	// CapabilitiesSettingsID is the id of the settings document with the
 	// capabilities for a given instance
 	CapabilitiesSettingsID = "io.cozy.settings.capabilities"
+	// ExternalTiesID is the id of the settings document with the external ties
+	// for a given instance
+	ExternalTiesID = "io.cozy.settings.external-ties"
 	// PassphraseParametersID is the id of settings document for the passphrase
 	// parameters used to hash the master password on client side.
 	PassphraseParametersID = "io.cozy.settings.passphrase"
@@ -103,4 +116,5 @@ var PlatformApps = []string{
 	"store",
 	"coachco2",
 	"mespapiers",
+	"dataproxy",
 }

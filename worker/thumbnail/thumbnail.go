@@ -2,6 +2,7 @@ package thumbnail
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -57,22 +58,29 @@ func init() {
 		Concurrency:  runtime.NumCPU(),
 		MaxExecCount: 1,
 		Reserved:     true,
-		Timeout:      3 * time.Hour,
+		Timeout:      24 * time.Hour,
 		WorkerFunc:   WorkerCheck,
 	})
 }
 
 // Worker is a worker that creates thumbnails for photos and images.
-func Worker(ctx *job.WorkerContext) error {
+func Worker(ctx *job.TaskContext) error {
 	var msg ImageMessage
 	if err := ctx.UnmarshalMessage(&msg); err != nil {
 		return err
 	}
+	log := ctx.Logger()
 
 	if msg.NoteImage != nil {
 		return resizeNoteImage(ctx, msg.NoteImage)
 	}
 	if msg.File != nil {
+		mutex := config.Lock().ReadWrite(ctx.Instance, "thumbnails/"+msg.File.ID())
+		if err := mutex.Lock(); err != nil {
+			return err
+		}
+		defer mutex.Unlock()
+		log.Debugf("%s %s", msg.File.ID(), msg.Format)
 		if _, ok := formats[msg.Format]; !ok {
 			return errors.New("invalid format")
 		}
@@ -90,14 +98,19 @@ func Worker(ctx *job.WorkerContext) error {
 		return nil
 	}
 
-	log := ctx.Logger()
-	log.WithNamespace("thumbnail").Debugf("%s %s", img.Verb, img.Doc.ID())
+	mutex := config.Lock().ReadWrite(ctx.Instance, "thumbnails/"+img.Doc.ID())
+	if err := mutex.Lock(); err != nil {
+		return err
+	}
+	defer mutex.Unlock()
+	log.Debugf("%s %s", img.Verb, img.Doc.ID())
+
 	switch img.Verb {
 	case "CREATED":
 		return generateThumbnails(ctx, &img.Doc)
 	case "UPDATED":
 		if err := removeThumbnails(ctx.Instance, &img.Doc); err != nil {
-			log.WithNamespace("thumbnail").Debugf("failed to remove thumbnails for %s: %s", img.Doc.ID(), err)
+			log.Debugf("failed to remove thumbnails for %s: %s", img.Doc.ID(), err)
 		}
 		return generateThumbnails(ctx, &img.Doc)
 	case "DELETED":
@@ -126,7 +139,7 @@ type thumbnailMsg struct {
 
 // WorkerCheck is a worker function that checks all the images to generate
 // missing thumbnails.
-func WorkerCheck(ctx *job.WorkerContext) error {
+func WorkerCheck(ctx *job.TaskContext) error {
 	var msg thumbnailMsg
 	if err := ctx.UnmarshalMessage(&msg); err != nil {
 		return err
@@ -205,14 +218,22 @@ func calculateMetadata(fs vfs.VFS, img *vfs.FileDoc) (*vfs.Metadata, error) {
 	return &meta, nil
 }
 
-func generateSingleThumbnail(ctx *job.WorkerContext, img *vfs.FileDoc, format string) error {
+func generateSingleThumbnail(ctx *job.TaskContext, img *vfs.FileDoc, format string) error {
 	if ok := checkByteSize(img); !ok {
 		return nil
 	}
 
 	fs := ctx.Instance.ThumbsFS()
+	exists, err := fs.ThumbExists(img, format)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
 	var in io.Reader
-	in, err := ctx.Instance.VFS().OpenFile(img)
+	in, err = ctx.Instance.VFS().OpenFile(img)
 	if err != nil {
 		return err
 	}
@@ -231,7 +252,7 @@ func generateSingleThumbnail(ctx *job.WorkerContext, img *vfs.FileDoc, format st
 	return err
 }
 
-func generateThumbnails(ctx *job.WorkerContext, img *vfs.FileDoc) error {
+func generateThumbnails(ctx *job.TaskContext, img *vfs.FileDoc) error {
 	if ok := checkByteSize(img); !ok {
 		return nil
 	}
@@ -268,6 +289,14 @@ func generateThumbnails(ctx *job.WorkerContext, img *vfs.FileDoc) error {
 			return err
 		}
 	}
+
+	exists, err := fs.ThumbExists(img, "tiny")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
 	_, err = recGenerateThumb(ctx, in, fs, img, "tiny", env, true)
 	return err
 }
@@ -282,7 +311,7 @@ func checkByteSize(img *vfs.FileDoc) bool {
 	return img.ByteSize < limit
 }
 
-func recGenerateThumb(ctx *job.WorkerContext, in io.Reader, fs vfs.Thumbser, img *vfs.FileDoc, format string, env []string, noOuput bool) (r io.Reader, err error) {
+func recGenerateThumb(ctx *job.TaskContext, in io.Reader, fs vfs.Thumbser, img *vfs.FileDoc, format string, env []string, noOuput bool) (r io.Reader, err error) {
 	defer func() {
 		if inCloser, ok := in.(io.Closer); ok {
 			if errc := inCloser.Close(); errc != nil && err == nil {
@@ -331,7 +360,7 @@ func recGenerateThumb(ctx *job.WorkerContext, in io.Reader, fs vfs.Thumbser, img
 // We are using some complicated ImageMagick options to optimize the speed and
 // quality of the generated thumbnails.
 // See https://www.smashingmagazine.com/2015/06/efficient-image-resizing-with-imagemagick/
-func generateThumb(ctx *job.WorkerContext, in io.Reader, out io.Writer, fileID string, format string, env []string) error {
+func generateThumb(ctx *job.TaskContext, in io.Reader, out io.Writer, fileID string, format string, env []string) error {
 	convertCmd := config.GetConfig().Jobs.ImageMagickConvertCmd
 	if convertCmd == "" {
 		convertCmd = "convert"
@@ -355,7 +384,9 @@ func generateThumb(ctx *job.WorkerContext, in io.Reader, out io.Writer, fileID s
 		"jpg:-", // Send the output on stdout, in JPEG format
 	}
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, convertCmd, args...)
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctxWithTimeout, convertCmd, args...)
 	cmd.Env = env
 	cmd.Stdin = in
 	cmd.Stdout = out
@@ -379,7 +410,7 @@ func removeThumbnails(i *instance.Instance, img *vfs.FileDoc) error {
 	return i.ThumbsFS().RemoveThumbs(img, vfs.ThumbnailFormatNames)
 }
 
-func resizeNoteImage(ctx *job.WorkerContext, img *note.Image) error {
+func resizeNoteImage(ctx *job.TaskContext, img *note.Image) error {
 	fs := ctx.Instance.ThumbsFS()
 	in, err := fs.OpenNoteThumb(img.ID(), consts.NoteImageOriginalFormat)
 	if err != nil {

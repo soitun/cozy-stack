@@ -19,10 +19,11 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/i18n"
+	"github.com/cozy/cozy-stack/pkg/metadata"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/realtime"
 	"github.com/cozy/cozy-stack/tests/testutils"
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,7 @@ func TestExecKonnector(t *testing.T) {
 		t.Skip("a couchdb is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	require.NoError(t, loadLocale(), "Could not load default locale translations")
 
 	setup := testutils.NewSetup(t, t.Name())
@@ -51,8 +52,9 @@ func TestExecKonnector(t *testing.T) {
 			Message:    msg,
 			WorkerType: "konnector",
 		})
-		ctx := job.NewWorkerContext("id", j, nil).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, nil)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		assert.Error(t, err)
 		assert.Equal(t, "Instance not found", err.Error())
@@ -67,8 +69,9 @@ func TestExecKonnector(t *testing.T) {
 			Message:    msg,
 			WorkerType: "konnector",
 		})
-		ctx := job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		assert.Error(t, err)
 		assert.Equal(t, "Application is not installed", err.Error())
@@ -102,8 +105,9 @@ func TestExecKonnector(t *testing.T) {
 		})
 
 		config.GetConfig().Konnectors.Cmd = ""
-		ctx := job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "exec")
@@ -176,10 +180,10 @@ echo "{\"type\": \"manifest\", \"message\": \"$(ls ${1}/manifest.konnector)\" }"
 			token := msg1[len(cozyURL):]
 			var claims permission.Claims
 			err2 := crypto.ParseJWT(token, func(t *jwt.Token) (interface{}, error) {
-				return inst.PickKey(t.Claims.(*permission.Claims).Audience)
+				return inst.PickKey(t.Claims.(*permission.Claims).Audience[0])
 			}, &claims)
 			assert.NoError(t, err2)
-			assert.Equal(t, consts.KonnectorAudience, claims.Audience)
+			assert.Equal(t, consts.KonnectorAudience, claims.Audience[0])
 			wg.Done()
 		}()
 
@@ -196,8 +200,9 @@ echo "{\"type\": \"manifest\", \"message\": \"$(ls ${1}/manifest.konnector)\" }"
 		})
 
 		config.GetConfig().Konnectors.Cmd = tmpScript
-		ctx := job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		assert.NoError(t, err)
 
@@ -282,8 +287,9 @@ echo "{\"type\": \"params\", \"message\": ${SECRET} }"
 		})
 
 		config.GetConfig().Konnectors.Cmd = tmpScript
-		ctx := job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		assert.NoError(t, err)
 
@@ -352,7 +358,11 @@ echo "{\"type\": \"toto\", \"message\": \"COZY_URL=${COZY_URL}\"}"
 
 		wg.Wait()
 
-		acc := &account.Account{}
+		acc := &account.Account{
+			Metadata: &metadata.CozyMetadata{
+				SourceIdentifier: "identifier1",
+			},
+		}
 
 		// Folder is created from DefaultFolderPath
 		wg.Add(1)
@@ -373,17 +383,21 @@ echo "{\"type\": \"toto\", \"message\": \"COZY_URL=${COZY_URL}\"}"
 		})
 
 		config.GetConfig().Konnectors.Cmd = tmpScript
-		ctx := job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel := job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		require.NoError(t, err)
 
 		wg.Wait()
 
 		dir, err := fs.DirByPath("/Administrative/toto")
-		assert.NoError(t, err)
-		assert.Len(t, dir.ReferencedBy, 1)
+		require.NoError(t, err)
+		require.Len(t, dir.ReferencedBy, 2)
+		assert.Equal(t, dir.ReferencedBy[0].Type, "io.cozy.konnectors")
 		assert.Equal(t, dir.ReferencedBy[0].ID, "io.cozy.konnectors/my-konnector-1")
+		assert.Equal(t, dir.ReferencedBy[1].Type, "io.cozy.accounts.sourceAccountIdentifier")
+		assert.Equal(t, dir.ReferencedBy[1].ID, "identifier1")
 		assert.Equal(t, "my-konnector-1", dir.CozyMetadata.CreatedByApp)
 		assert.Contains(t, dir.CozyMetadata.CreatedOn, inst.Domain)
 		assert.Len(t, dir.CozyMetadata.UpdatedByApps, 1)
@@ -412,8 +426,9 @@ echo "{\"type\": \"toto\", \"message\": \"COZY_URL=${COZY_URL}\"}"
 		config.GetConfig().Konnectors.Cmd = tmpScript
 		defer func() { config.GetConfig().Konnectors.Cmd = origCmd }()
 
-		ctx = job.NewWorkerContext("id", j, inst).
-			WithCookie(&konnectorWorker{})
+		ctx, cancel = job.NewTaskContext("id", j, inst)
+		defer cancel()
+		ctx = ctx.WithCookie(&konnectorWorker{})
 		err = worker(ctx)
 		require.NoError(t, err)
 
@@ -421,7 +436,11 @@ echo "{\"type\": \"toto\", \"message\": \"COZY_URL=${COZY_URL}\"}"
 
 		dir, err = fs.DirByPath("/Administrative/Trainline/account-1")
 		require.NoError(t, err)
-		require.Len(t, dir.ReferencedBy, 1)
+		require.Len(t, dir.ReferencedBy, 2)
+		assert.Equal(t, dir.ReferencedBy[0].Type, "io.cozy.konnectors")
+		assert.Equal(t, dir.ReferencedBy[0].ID, "io.cozy.konnectors/my-konnector-1")
+		assert.Equal(t, dir.ReferencedBy[1].Type, "io.cozy.accounts.sourceAccountIdentifier")
+		assert.Equal(t, dir.ReferencedBy[1].ID, "identifier1")
 		assert.Equal(t, dir.ReferencedBy[0].ID, "io.cozy.konnectors/my-konnector-1")
 		assert.Equal(t, "my-konnector-1", dir.CozyMetadata.CreatedByApp)
 		assert.Contains(t, dir.CozyMetadata.CreatedOn, inst.Domain)
@@ -432,6 +451,43 @@ echo "{\"type\": \"toto\", \"message\": \"COZY_URL=${COZY_URL}\"}"
 		err = couchdb.GetDoc(inst, consts.Accounts, acc.ID(), &updatedAcc)
 		require.NoError(t, err)
 		assert.Equal(t, updatedAcc.DefaultFolderPath, "/Administrative/Trainline/account-1")
+	})
+}
+
+func TestBeforeHookKonnector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a couchdb is required for this test: test skipped due to the use of --short flag")
+	}
+
+	config.UseTestFile(t)
+	require.NoError(t, loadLocale(), "Could not load default locale translations")
+
+	setup := testutils.NewSetup(t, t.Name())
+	slug, err := setup.InstallMiniKonnector()
+	require.NoError(t, err)
+
+	inst := setup.GetTestInstance()
+
+	t.Run("stack maintenance", func(t *testing.T) {
+		err := app.ActivateMaintenance(slug, nil)
+		require.NoError(t, err)
+
+		msg, err := job.NewMessage(map[string]interface{}{
+			"konnector": slug,
+		})
+		require.NoError(t, err)
+
+		j := job.NewJob(inst, &job.JobRequest{
+			Message:    msg,
+			WorkerType: "konnector",
+		})
+
+		shouldExec, _ := beforeHookKonnector(j)
+		assert.False(t, shouldExec)
+
+		testutils.WithFlag(t, inst, "harvest.skip-maintenance-for", map[string]interface{}{"list": []string{slug}})
+		shouldExec, _ = beforeHookKonnector(j)
+		assert.True(t, shouldExec)
 	})
 }
 

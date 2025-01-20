@@ -6,7 +6,6 @@ import (
 
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/manager"
-	"github.com/mitchellh/mapstructure"
 )
 
 // ManagerURLKind is an enum type for the different kinds of manager URLs.
@@ -20,22 +19,24 @@ const (
 	ManagerPremiumURL
 	// ManagerBlockedURL is the kind for a redirection of a blocked instance.
 	ManagerBlockedURL
+	// ManagerBaseURL is the kind for building other manager URLs
+	ManagerBaseURL
 )
 
 // ManagerURL returns an external string for the given ManagerURL kind. It is
 // used for redirecting the user to a manager URL.
 func (i *Instance) ManagerURL(k ManagerURLKind) (string, error) {
+	c := clouderyConfig(i)
+	if c == nil {
+		return "", nil
+	}
+
 	if i.UUID == "" {
 		return "", nil
 	}
 
-	config, ok := i.SettingsContext()
-	if !ok {
-		return "", nil
-	}
-
-	base, ok := config["manager_url"].(string)
-	if !ok {
+	base := c.API.URL
+	if base == "" {
 		return "", nil
 	}
 
@@ -52,6 +53,8 @@ func (i *Instance) ManagerURL(k ManagerURLKind) (string, error) {
 		path = fmt.Sprintf("/cozy/instances/%s/tos", url.PathEscape(i.UUID))
 	case ManagerBlockedURL:
 		path = fmt.Sprintf("/cozy/instances/%s/blocked", url.PathEscape(i.UUID))
+	case ManagerBaseURL:
+		path = ""
 	default:
 		panic("unknown ManagerURLKind")
 	}
@@ -60,31 +63,35 @@ func (i *Instance) ManagerURL(k ManagerURLKind) (string, error) {
 	return baseURL.String(), nil
 }
 
-type managerConfig struct {
-	API struct {
-		URL   string
-		Token string
-	}
-}
-
 // APIManagerClient returns a client to talk to the manager via its API.
 func APIManagerClient(inst *Instance) *manager.APIClient {
-	contexts := config.GetConfig().Clouderies
-	context, ok := inst.GetFromContexts(contexts)
-	if !ok {
+	c := clouderyConfig(inst)
+	if c == nil {
 		return nil
 	}
 
-	var config managerConfig
-	err := mapstructure.Decode(context, &config)
-	if err != nil {
-		return nil
-	}
-
-	api := config.API
+	api := c.API
 	if api.URL == "" || api.Token == "" {
 		return nil
 	}
 
 	return manager.NewAPIClient(api.URL, api.Token)
+}
+
+func clouderyConfig(inst *Instance) *config.ClouderyConfig {
+	clouderies := config.GetConfig().Clouderies
+	if clouderies == nil {
+		return nil
+	}
+
+	var cloudery config.ClouderyConfig
+	cloudery, ok := clouderies[inst.ContextName]
+	if !ok {
+		cloudery, ok = clouderies[config.DefaultInstanceContext]
+	}
+	if !ok {
+		return nil
+	}
+
+	return &cloudery
 }

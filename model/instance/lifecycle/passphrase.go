@@ -9,10 +9,11 @@ import (
 
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
 	"github.com/cozy/cozy-stack/model/instance"
-	"github.com/cozy/cozy-stack/model/job"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/crypto"
-	"github.com/gofrs/uuid"
+	"github.com/cozy/cozy-stack/pkg/emailer"
+	"github.com/gofrs/uuid/v5"
 )
 
 // ErrHintSameAsPassword is used when trying to set an hint that is the same as
@@ -72,7 +73,7 @@ func SendHint(inst *instance.Instance) error {
 		inst.Logger().Info("Send hint ignored: not registered")
 		return nil
 	}
-	publicName, err := inst.PublicName()
+	publicName, err := csettings.PublicName(inst)
 	if err != nil {
 		return err
 	}
@@ -80,7 +81,7 @@ func SendHint(inst *instance.Instance) error {
 	if err != nil {
 		return err
 	}
-	return SendMail(inst, &Mail{
+	return emailer.SendEmail(inst, &emailer.TransactionalEmailCmd{
 		TemplateName: "passphrase_hint",
 		TemplateValues: map[string]interface{}{
 			"BaseURL":    inst.PageURL("/", nil),
@@ -93,7 +94,7 @@ func SendHint(inst *instance.Instance) error {
 
 // RequestPassphraseReset generates a new registration token for the user to
 // renew its password.
-func RequestPassphraseReset(inst *instance.Instance) error {
+func RequestPassphraseReset(inst *instance.Instance, from string) error {
 	// If a registration token is set, we do not generate another token than the
 	// registration one, and bail.
 	if inst.RegisterToken != nil {
@@ -118,12 +119,13 @@ func RequestPassphraseReset(inst *instance.Instance) error {
 	// passphrase.
 	resetURL := inst.PageURL("/auth/passphrase_renew", url.Values{
 		"token": {hex.EncodeToString(inst.PassphraseResetToken)},
+		"from":  {from},
 	})
-	publicName, err := inst.PublicName()
+	publicName, err := csettings.PublicName(inst)
 	if err != nil {
 		return err
 	}
-	return SendMail(inst, &Mail{
+	return emailer.SendEmail(inst, &emailer.TransactionalEmailCmd{
 		TemplateName: "passphrase_reset",
 		TemplateValues: map[string]interface{}{
 			"BaseURL":             inst.PageURL("/", nil),
@@ -132,29 +134,6 @@ func RequestPassphraseReset(inst *instance.Instance) error {
 			"CozyPass":            inst.HasForcedOIDC(),
 		},
 	})
-}
-
-// Mail contains the informations to send a mail for the instance owner.
-type Mail struct {
-	TemplateName   string
-	TemplateValues map[string]interface{}
-}
-
-// SendMail send a mail to the instance owner.
-func SendMail(inst *instance.Instance, m *Mail) error {
-	msg, err := job.NewMessage(map[string]interface{}{
-		"mode":            "noreply",
-		"template_name":   m.TemplateName,
-		"template_values": m.TemplateValues,
-	})
-	if err != nil {
-		return err
-	}
-	_, err = job.System().PushJob(inst, &job.JobRequest{
-		WorkerType: "sendmail",
-		Message:    msg,
-	})
-	return err
 }
 
 // CheckPassphraseRenewToken checks whether the given token is good to use for
@@ -308,6 +287,7 @@ func setPassphraseKdfAndSecret(inst *instance.Instance, settings *settings.Setti
 	if params.PublicKey != "" && params.PrivateKey != "" {
 		_ = settings.SetKeyPair(inst, params.PublicKey, params.PrivateKey)
 	}
+	inst.SetPasswordDefined(true)
 }
 
 // CreatePassphraseKey creates an encryption key for Bitwarden. It returns in
@@ -341,40 +321,13 @@ func CreateKeyPair(symKey []byte) (string, string, error) {
 	return pubKey, encrypted, nil
 }
 
-// CheckPassphrase confirm an instance password
-func CheckPassphrase(inst *instance.Instance, pass []byte) error {
-	if len(pass) == 0 {
-		return instance.ErrMissingPassphrase
-	}
-
-	needUpdate, err := crypto.CompareHashAndPassphrase(inst.PassphraseHash, pass)
-	if err != nil {
-		return err
-	}
-
-	if !needUpdate {
-		return nil
-	}
-
-	newHash, err := crypto.GenerateFromPassphrase(pass)
-	if err != nil {
-		return err
-	}
-
-	inst.PassphraseHash = newHash
-	if err = update(inst); err != nil {
-		inst.Logger().Errorf("Failed to update hash in db: %s", err)
-	}
-	return nil
-}
-
 // CheckHint returns true if the hint is valid, ie it is not
 // the same as the password.
 func CheckHint(inst *instance.Instance, setting *settings.Settings, hint string) error {
 	salt := inst.PassphraseSalt()
 	iterations := setting.PassphraseKdfIterations
 	hashed, _ := crypto.HashPassWithPBKDF2([]byte(hint), salt, iterations)
-	if err := CheckPassphrase(inst, hashed); err == nil {
+	if err := instance.CheckPassphrase(inst, hashed); err == nil {
 		return ErrHintSameAsPassword
 	}
 	return nil
@@ -382,6 +335,5 @@ func CheckHint(inst *instance.Instance, setting *settings.Settings, hint string)
 
 // NewSecurityStamp returns a new UUID that can be used as a security stamp.
 func NewSecurityStamp() string {
-	id, _ := uuid.NewV4()
-	return id.String()
+	return uuid.Must(uuid.NewV7()).String()
 }

@@ -25,6 +25,9 @@ const (
 	// NotificationDiskQuota category for sending alert when reaching 90% of disk
 	// usage quota.
 	NotificationDiskQuota = "disk-quota"
+	// NotificationOAuthClients category for sending alert when exceeding the
+	// connected OAuth clients limit.
+	NotificationOAuthClients = "oauth-clients"
 )
 
 var (
@@ -36,28 +39,75 @@ var (
 			MailTemplate: "notifications_diskquota",
 			MinInterval:  7 * 24 * time.Hour,
 		},
+		NotificationOAuthClients: {
+			Description:  "Warn about the connected OAuth clients count exceeding the offer limit",
+			Collapsible:  false,
+			Stateful:     false,
+			MailTemplate: "notifications_oauthclients",
+		},
 	}
 )
 
 func init() {
-	vfs.RegisterDiskQuotaAlertCallback(func(domain string, exceeded bool) {
+	vfs.RegisterDiskQuotaAlertCallback(func(domain string, capsizeExceeded bool) {
 		i, err := lifecycle.GetInstance(domain)
 		if err != nil {
 			return
 		}
+
+		title := i.Translate("Notifications Disk Quota Close Title")
+		message := i.Translate("Notifications Disk Quota Close Message")
 		offersLink, err := i.ManagerURL(instance.ManagerPremiumURL)
 		if err != nil {
 			return
 		}
 		cozyDriveLink := i.SubDomain(consts.DriveSlug)
+		redirectLink := consts.SettingsSlug + "/#/storage"
+
 		n := &notification.Notification{
-			State: exceeded,
+			Title:   title,
+			Message: message,
+			Slug:    consts.SettingsSlug,
+			State:   capsizeExceeded,
 			Data: map[string]interface{}{
+				// For email notification
 				"OffersLink":    offersLink,
 				"CozyDriveLink": cozyDriveLink.String(),
+
+				// For mobile push notification
+				"appName":      "",
+				"redirectLink": redirectLink,
 			},
+			PreferredChannels: []string{"mobile"},
 		}
 		_ = PushStack(domain, NotificationDiskQuota, n)
+	})
+
+	oauth.RegisterClientsLimitAlertCallback(func(i *instance.Instance, clientName string, clientsLimit int) {
+		devicesLink := i.SubDomain(consts.SettingsSlug)
+		devicesLink.Fragment = "/connectedDevices"
+
+		var offersLink string
+		if i.HasPremiumLinksEnabled() {
+			var err error
+			offersLink, err = i.ManagerURL(instance.ManagerPremiumURL)
+			if err != nil {
+				i.Logger().Errorf("Could not get instance Premium Manager URL: %s", err.Error())
+			}
+		}
+
+		n := &notification.Notification{
+			Title: i.Translate("Notifications OAuth Clients Subject"),
+			Slug:  consts.SettingsSlug,
+			Data: map[string]interface{}{
+				"ClientName":   clientName,
+				"ClientsLimit": clientsLimit,
+				"OffersLink":   offersLink,
+				"DevicesLink":  devicesLink.String(),
+			},
+			PreferredChannels: []string{"mail"},
+		}
+		PushStack(i.DomainName(), NotificationOAuthClients, n)
 	})
 }
 
@@ -73,6 +123,17 @@ func PushStack(domain string, category string, n *notification.Notification) err
 	if p == nil {
 		return ErrCategoryNotFound
 	}
+	return makePush(inst, p, n)
+}
+
+// PushCLI creates and sends a new notification where the source is a CLI
+// client which provides both the notification content and its properties.
+func PushCLI(domain string, p *notification.Properties, n *notification.Notification) error {
+	inst, err := lifecycle.GetInstance(domain)
+	if err != nil {
+		return err
+	}
+	n.Originator = "cli"
 	return makePush(inst, p, n)
 }
 

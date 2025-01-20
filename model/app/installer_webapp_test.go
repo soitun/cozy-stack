@@ -33,7 +33,7 @@ func TestInstallerWebApp(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 
 	testutils.NeedCouchdb(t)
 
@@ -48,7 +48,7 @@ func TestInstallerWebApp(t *testing.T) {
 	}
 
 	if !stackStarted {
-		_, err := stack.Start()
+		_, _, err := stack.Start()
 		if err != nil {
 			require.NoError(t, err, "Error while starting job system")
 		}
@@ -1121,7 +1121,7 @@ func TestInstallerWebApp(t *testing.T) {
 		assert.NoError(t, err)
 		_, err = inst.RunSync()
 		assert.Error(t, err)
-		assert.ErrorIs(t, err, app.ErrInvalidManifestTypes)
+		assert.ErrorIs(t, err, app.ErrInvalidManifestForWebapp)
 	})
 }
 

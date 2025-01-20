@@ -1,3 +1,5 @@
+// Package exec is for the exec worker, which covers both konnector and service
+// execution.
 package exec
 
 import (
@@ -13,6 +15,7 @@ import (
 
 	"github.com/cozy/cozy-stack/model/account"
 	"github.com/cozy/cozy-stack/model/app"
+	"github.com/cozy/cozy-stack/model/feature"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/job"
@@ -110,8 +113,7 @@ func jobHookErrorCheckerKonnector(err error) bool {
 
 	lastError := err.Error()
 	if strings.HasPrefix(lastError, konnErrorLoginFailed) ||
-		strings.HasPrefix(lastError, konnErrorUserActionNeeded) &&
-			lastError != konnErrorUserActionNeededCgu {
+		strings.HasPrefix(lastError, konnErrorUserActionNeeded) {
 		return false
 	}
 	return true
@@ -125,6 +127,21 @@ func beforeHookKonnector(j *job.Job) (bool, error) {
 
 	if err := json.Unmarshal(j.Message, &msg); err == nil {
 		slug = msg.Konnector
+
+		inst, err := lifecycle.GetInstance(j.DomainName())
+		if err != nil {
+			return false, err
+		}
+
+		flags, err := feature.GetFlags(inst)
+		if err != nil {
+			return false, err
+		}
+		skipMaintenance, err := flags.HasListItem("harvest.skip-maintenance-for", slug)
+		if err != nil {
+			return false, err
+		}
+
 		doc, err := app.GetMaintenanceOptions(slug)
 		if err != nil {
 			j.Logger().Warnf("konnector %q could not get local maintenance status", slug)
@@ -135,13 +152,16 @@ func beforeHookKonnector(j *job.Job) (bool, error) {
 					return true, nil
 				}
 			}
-			j.Logger().Infof("konnector %q has not been triggered because of its maintenance status", slug)
-			return false, nil
+
+			if skipMaintenance {
+				j.Logger().Infof("skipping konnector %q's maintenance", slug)
+				return true, nil
+			} else {
+				j.Logger().Infof("konnector %q has not been triggered because of its maintenance status", slug)
+				return false, nil
+			}
 		}
-		inst, err := lifecycle.GetInstance(j.DomainName())
-		if err != nil {
-			return false, err
-		}
+
 		app, err := registry.GetApplication(slug, inst.Registries())
 		if err != nil {
 			j.Logger().Warnf("konnector %q could not get application to fetch maintenance status", slug)
@@ -149,8 +169,14 @@ func beforeHookKonnector(j *job.Job) (bool, error) {
 			if j.Manual && !app.MaintenanceOptions.FlagDisallowManualExec {
 				return true, nil
 			}
-			j.Logger().Infof("konnector %q has not been triggered because of its maintenance status", slug)
-			return false, nil
+
+			if skipMaintenance {
+				j.Logger().Infof("skipping konnector %q's maintenance", slug)
+				return true, nil
+			} else {
+				j.Logger().Infof("konnector %q has not been triggered because of its maintenance status", slug)
+				return false, nil
+			}
 		}
 
 		if msg.BIWebhook {
@@ -167,8 +193,13 @@ func beforeHookKonnector(j *job.Job) (bool, error) {
 		return false, err
 	}
 	if state.Status == job.Errored {
-		if strings.HasPrefix(state.LastError, konnErrorLoginFailed) ||
-			strings.HasPrefix(state.LastError, konnErrorUserActionNeeded) {
+		ignore :=
+			strings.HasPrefix(state.LastError, konnErrorUserActionNeeded) &&
+				state.LastError != konnErrorUserActionNeededCgu
+		if strings.HasPrefix(state.LastError, konnErrorLoginFailed) {
+			ignore = true
+		}
+		if ignore {
 			j.Logger().
 				WithField("account_id", msg.Account).
 				WithField("slug", slug).
@@ -179,7 +210,7 @@ func beforeHookKonnector(j *job.Job) (bool, error) {
 	return true, nil
 }
 
-func (w *konnectorWorker) PrepareWorkDir(ctx *job.WorkerContext, i *instance.Instance) (string, func(), error) {
+func (w *konnectorWorker) PrepareWorkDir(ctx *job.TaskContext, i *instance.Instance) (string, func(), error) {
 	cleanDir := func() {}
 
 	// Reset the errors from previous runs on retries
@@ -269,7 +300,7 @@ func (w *konnectorWorker) PrepareWorkDir(ctx *job.WorkerContext, i *instance.Ins
 		if fileExecPath == "" {
 			return "", cleanDir, job.ErrAbort
 		}
-		workDir = path.Join(workDir, fileExecPath)
+		return path.Join(workDir, fileExecPath), cleanDir, nil
 	}
 
 	return workDir, cleanDir, nil
@@ -277,7 +308,7 @@ func (w *konnectorWorker) PrepareWorkDir(ctx *job.WorkerContext, i *instance.Ins
 
 // ensureFolderToSave tries hard to give a folder to the konnector where it can
 // write its files if it needs to do so.
-func (w *konnectorWorker) ensureFolderToSave(ctx *job.WorkerContext, inst *instance.Instance, acc *account.Account) error {
+func (w *konnectorWorker) ensureFolderToSave(ctx *job.TaskContext, inst *instance.Instance, acc *account.Account) error {
 	fs := inst.VFS()
 	msg := w.msg
 
@@ -295,6 +326,11 @@ func (w *konnectorWorker) ensureFolderToSave(ctx *job.WorkerContext, inst *insta
 		return err
 	}
 
+	var sourceAccountIdentifier string
+	if acc != nil && acc.Metadata != nil {
+		sourceAccountIdentifier = acc.Metadata.SourceIdentifier
+	}
+
 	// 2. Check if the konnector has a reference to a folder
 	start := []string{consts.Konnectors, consts.Konnectors + "/" + w.slug}
 	end := []string{start[0], start[1], couchdb.MaxString}
@@ -310,10 +346,14 @@ func (w *konnectorWorker) ensureFolderToSave(ctx *job.WorkerContext, inst *insta
 		for _, row := range res.Rows {
 			dir := &vfs.DirDoc{}
 			if err := couchdb.GetDoc(inst, consts.Files, row.ID, dir); err == nil {
-				if !strings.HasPrefix(dir.Fullpath, vfs.TrashDirName) {
-					count++
-					dirID = row.ID
+				if strings.HasPrefix(dir.Fullpath, vfs.TrashDirName) {
+					continue
 				}
+				if !hasCompatibleSourceAccountIdentifier(dir, sourceAccountIdentifier) {
+					continue
+				}
+				count++
+				dirID = row.ID
 			}
 		}
 		if count == 1 {
@@ -352,6 +392,12 @@ func (w *konnectorWorker) ensureFolderToSave(ctx *job.WorkerContext, inst *insta
 			Type: consts.Konnectors,
 			ID:   consts.Konnectors + "/" + w.slug,
 		})
+		if sourceAccountIdentifier != "" {
+			dir.AddReferencedBy(couchdb.DocReference{
+				Type: consts.SourceAccountIdentifier,
+				ID:   sourceAccountIdentifier,
+			})
+		}
 		instanceURL := inst.PageURL("/", nil)
 		if dir.CozyMetadata == nil {
 			dir.CozyMetadata = vfs.NewCozyMetadata(instanceURL)
@@ -393,33 +439,54 @@ func computeFolderPath(inst *instance.Instance, slug string, acc *account.Accoun
 	return fmt.Sprintf("/%s/%s/%s", admin, title, accountName)
 }
 
+func hasCompatibleSourceAccountIdentifier(dir *vfs.DirDoc, sourceAccountIdentifier string) bool {
+	if sourceAccountIdentifier == "" {
+		return true
+	}
+	nb := 0
+	for _, ref := range dir.ReferencedBy {
+		if ref.Type == consts.SourceAccountIdentifier {
+			if ref.ID == sourceAccountIdentifier {
+				return true
+			}
+			nb++
+		}
+	}
+	return nb == 0
+}
+
 // ensurePermissions checks that the konnector has the permissions to write
 // files in the folder referenced by the konnector, and adds the permission if
 // needed.
 func (w *konnectorWorker) ensurePermissions(inst *instance.Instance) error {
-	perms, err := permission.GetForKonnector(inst, w.slug)
-	if err != nil {
-		return err
-	}
-	value := consts.Konnectors + "/" + w.slug
-	for _, rule := range perms.Permissions {
-		if rule.Type == consts.Files && rule.Selector == couchdb.SelectorReferencedBy {
-			for _, val := range rule.Values {
-				if val == value {
-					return nil
+	for {
+		perms, err := permission.GetForKonnector(inst, w.slug)
+		if err != nil {
+			return err
+		}
+		value := consts.Konnectors + "/" + w.slug
+		for _, rule := range perms.Permissions {
+			if rule.Type == consts.Files && rule.Selector == couchdb.SelectorReferencedBy {
+				for _, val := range rule.Values {
+					if val == value {
+						return nil
+					}
 				}
 			}
 		}
+		rule := permission.Rule{
+			Type:        consts.Files,
+			Title:       "referenced folders",
+			Description: "folders referenced by the konnector",
+			Selector:    couchdb.SelectorReferencedBy,
+			Values:      []string{value},
+		}
+		perms.Permissions = append(perms.Permissions, rule)
+		err = couchdb.UpdateDoc(inst, perms)
+		if !couchdb.IsConflictError(err) {
+			return err
+		}
 	}
-	rule := permission.Rule{
-		Type:        consts.Files,
-		Title:       "referenced folders",
-		Description: "folders referenced by the konnector",
-		Selector:    couchdb.SelectorReferencedBy,
-		Values:      []string{value},
-	}
-	perms.Permissions = append(perms.Permissions, rule)
-	return couchdb.UpdateDoc(inst, perms)
 }
 
 func copyFiles(workFS afero.Fs, fileServer appfs.FileServer, slug, version, shasum string) error {
@@ -522,7 +589,7 @@ func (w *konnectorWorker) Slug() string {
 	return w.slug
 }
 
-func (w *konnectorWorker) PrepareCmdEnv(ctx *job.WorkerContext, i *instance.Instance) (cmd string, env []string, err error) {
+func (w *konnectorWorker) PrepareCmdEnv(ctx *job.TaskContext, i *instance.Instance) (cmd string, env []string, err error) {
 	parameters := w.man.Parameters()
 
 	accountTypes, err := account.FindAccountTypesBySlug(w.slug, i.ContextName)
@@ -578,11 +645,11 @@ func (w *konnectorWorker) PrepareCmdEnv(ctx *job.WorkerContext, i *instance.Inst
 	return
 }
 
-func (w *konnectorWorker) Logger(ctx *job.WorkerContext) *logger.Entry {
+func (w *konnectorWorker) Logger(ctx *job.TaskContext) logger.Logger {
 	return ctx.Logger().WithField("slug", w.slug)
 }
 
-func (w *konnectorWorker) ScanOutput(ctx *job.WorkerContext, i *instance.Instance, line []byte) error {
+func (w *konnectorWorker) ScanOutput(ctx *job.TaskContext, i *instance.Instance, line []byte) error {
 	var msg struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
@@ -637,7 +704,7 @@ func (w *konnectorWorker) Error(i *instance.Instance, err error) error {
 	return err
 }
 
-func (w *konnectorWorker) Commit(ctx *job.WorkerContext, errjob error) error {
+func (w *konnectorWorker) Commit(ctx *job.TaskContext, errjob error) error {
 	log := w.Logger(ctx)
 	if w.msg != nil {
 		log = log.WithField("account_id", w.msg.Account)

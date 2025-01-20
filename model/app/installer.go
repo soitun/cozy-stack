@@ -14,21 +14,22 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/pkg/appfs"
+	build "github.com/cozy/cozy-stack/pkg/config"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/hooks"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/realtime"
 	"github.com/cozy/cozy-stack/pkg/registry"
 	"github.com/cozy/cozy-stack/pkg/utils"
-	"github.com/sirupsen/logrus"
 )
 
 var slugReg = regexp.MustCompile(`^[a-z0-9\-]+$`)
 
-var ErrInvalidManifestTypes = errors.New("manifest types are not the sames")
+var ErrInvalidManifestTypes = errors.New("Manifest type is unknown")
+var ErrInvalidManifestForWebapp = errors.New("Manifest type is not valid for a webapp. Maybe you want to install a konnector?")
+var ErrInvalidManifestForKonnector = errors.New("Manifest type is not valid for a konnector. Maybe you want to install a webapp?")
 
 // Operation is the type of operation the installer is created for.
 type Operation int
@@ -59,7 +60,7 @@ type Installer struct {
 	context string
 
 	manc chan Manifest
-	log  *logger.Entry
+	log  logger.Logger
 }
 
 // InstallerOptions provides the slug name of the application along with the
@@ -137,7 +138,7 @@ func NewInstaller(in *instance.Instance, fs appfs.Copier, opts *InstallerOptions
 		installType = "delete"
 	}
 
-	log := logger.WithDomain(in.DomainName()).WithFields(logrus.Fields{
+	log := logger.WithDomain(in.DomainName()).WithFields(logger.Fields{
 		"nspace":        "apps",
 		"slug":          man.Slug(),
 		"version_start": man.Version(),
@@ -307,23 +308,20 @@ func (i *Installer) run() (err error) {
 // Note that the fetched manifest is returned even if an error occurred while
 // upgrading.
 func (i *Installer) install() error {
-	args := []string{i.db.DomainName(), i.slug}
-	return hooks.Execute("install-app", args, func() error {
-		newManifest, err := i.ReadManifest(Installing)
-		if err != nil {
-			i.log.Debugf("Could not read manifest")
-			return err
-		}
-		i.man = newManifest
-		i.sendRealtimeEvent()
-		i.notifyChannel()
-		if err := i.fetcher.Fetch(i.src, i.fs, i.man); err != nil {
-			i.log.Debugf("Could not fetch tarball")
-			return err
-		}
-		i.man.SetState(i.endState)
-		return i.man.Create(i.db)
-	})
+	newManifest, err := i.ReadManifest(Installing)
+	if err != nil {
+		i.log.Debugf("Could not read manifest")
+		return err
+	}
+	i.man = newManifest
+	i.sendRealtimeEvent()
+	i.notifyChannel()
+	if err := i.fetcher.Fetch(i.src, i.fs, i.man); err != nil {
+		i.log.Debugf("Could not fetch tarball")
+		return err
+	}
+	i.man.SetState(i.endState)
+	return i.man.Create(i.db)
 }
 
 // checkSkipPermissions checks if the instance contexts is configured to skip
@@ -409,7 +407,22 @@ func (i *Installer) update() error {
 	// verifyPermissions flag is activated (for non manual updates for example),
 	// we cancel out the update and mark the UpdateAvailable field of the
 	// application instead of actually updating.
-	if makeUpdate && !isPlatformApp(oldManifest, i.context) {
+	if build.IsDevRelease() {
+		// If we are in dev release we want to automatically accept any permissions set
+		// inside the manifest. This allows bypassing the authorization acceptation
+		// page, a tiresome step for local dev.
+		switch newManifest.AppType() {
+		case consts.WebappType:
+			err = permission.ForceWebapp(i.db, newManifest.Slug(), newManifest.Permissions())
+		case consts.KonnectorType:
+			err = permission.ForceKonnector(i.db, newManifest.Slug(), newManifest.Permissions())
+		default:
+			err = fmt.Errorf("invalid app type: %q", newManifest.AppType())
+		}
+		if err != nil {
+			return fmt.Errorf("failed to force the permission set: %w", err)
+		}
+	} else if makeUpdate && !isPlatformApp(oldManifest, i.context) {
 		oldPermissions := oldManifest.Permissions()
 		newPermissions := newManifest.Permissions()
 		samePermissions := false
@@ -518,10 +531,7 @@ func (i *Installer) delete() error {
 	if err := i.checkState(i.man); err != nil {
 		return err
 	}
-	args := []string{i.db.DomainName(), i.slug}
-	return hooks.Execute("uninstall-app", args, func() error {
-		return i.man.Delete(i.db)
-	})
+	return i.man.Delete(i.db)
 }
 
 // checkState returns whether or not the manifest is in the right state to
@@ -593,7 +603,16 @@ func (i *Installer) ReadManifest(state State) (Manifest, error) {
 	appTypesMismatch := i.man.AppType() != newManifestAppType
 
 	if !appTypesEmpty && appTypesMismatch {
-		return nil, fmt.Errorf("%w: expected %d, got %d. Are you sure of %s type ? (konnector/webapp)", ErrInvalidManifestTypes, i.man.AppType(), newManifestAppType, i.man.Slug())
+		var typeError error
+		switch i.man.AppType() {
+		case consts.KonnectorType:
+			typeError = ErrInvalidManifestForKonnector
+		case consts.WebappType:
+			typeError = ErrInvalidManifestForWebapp
+		default:
+			typeError = ErrInvalidManifestTypes
+		}
+		return nil, fmt.Errorf("[%s] %w", i.man.Slug(), typeError)
 	}
 	return newManifest, nil
 }
@@ -621,51 +640,58 @@ func (i *Installer) ManifestChannel() chan Manifest {
 // DoLazyUpdate tries to update an application before using it
 func DoLazyUpdate(in *instance.Instance, man Manifest, copier appfs.Copier, registries []*url.URL) Manifest {
 	src, err := url.Parse(man.Source())
-	if err != nil || src.Scheme != "registry" {
+	if err != nil {
 		return man
 	}
-	var v *registry.Version
-	channel, _ := getRegistryChannel(src)
-	v, errv := registry.GetLatestVersion(man.Slug(), channel, registries)
-	if errv != nil {
-		return man
-	}
-	if v.Version == man.Version() {
-		// In some cases, if the source had been altered mutiples times, the app
-		// may currently be in a stale state.
 
-		// Example:
-		// - The version 1.0.0 of the "foobar" konnector is installed from
-		// "stable" channel
-		// - The use switches to "beta" channel, the version 1.0.1 is available,
-		// but with extra perms
-		// - The update is blocked because of these news perms, the
-		// "available_version" is set to 1.0.1, the user switches back to "stable"
-		// channel
-		// - We are now on a stale state, no new version is available, but an
-		// available_version is set
-
-		// We ensure that we are not in this stale state by removing the
-		// available version field from the manifest if the latest version is
-		// the same as the current version
-		if man.AvailableVersion() != "" {
-			man.SetAvailableVersion("")
-			_ = man.Update(in, nil)
+	if src.Scheme == "registry" {
+		var v *registry.Version
+		channel, _ := getRegistryChannel(src)
+		v, errv := registry.GetLatestVersion(man.Slug(), channel, registries)
+		if errv != nil {
+			return man
 		}
-		return man
+		if v.Version == man.Version() {
+			// In some cases, if the source had been altered mutiples times, the app
+			// may currently be in a stale state.
+
+			// Example:
+			// - The version 1.0.0 of the "foobar" konnector is installed from
+			// "stable" channel
+			// - The use switches to "beta" channel, the version 1.0.1 is available,
+			// but with extra perms
+			// - The update is blocked because of these news perms, the
+			// "available_version" is set to 1.0.1, the user switches back to "stable"
+			// channel
+			// - We are now on a stale state, no new version is available, but an
+			// available_version is set
+
+			// We ensure that we are not in this stale state by removing the
+			// available version field from the manifest if the latest version is
+			// the same as the current version
+			if man.AvailableVersion() != "" {
+				man.SetAvailableVersion("")
+				_ = man.Update(in, nil)
+			}
+			return man
+		}
+
+		if man.AvailableVersion() != "" && v.Version == man.AvailableVersion() {
+			return man
+		}
+		if channel == "stable" && !IsMoreRecent(man.Version(), v.Version) {
+			return man
+		}
 	}
 
-	if man.AvailableVersion() != "" && v.Version == man.AvailableVersion() {
-		return man
-	}
-	if channel == "stable" && !IsMoreRecent(man.Version(), v.Version) {
-		return man
-	}
 	inst, err := NewInstaller(in, copier, &InstallerOptions{
-		Operation:  Update,
-		Manifest:   man,
-		Registries: registries,
-		SourceURL:  src.String(),
+		Operation:        Update,
+		Manifest:         man,
+		Registries:       registries,
+		SourceURL:        src.String(),
+		Type:             man.AppType(),
+		Slug:             man.Slug(),
+		PermissionsAcked: false,
 	})
 	if err != nil {
 		return man

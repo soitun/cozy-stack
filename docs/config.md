@@ -4,13 +4,13 @@
 
 ## Main Configuration file
 
-You can configure your `cozy-stack` using a configuration file. 
+You can configure your `cozy-stack` using a configuration file.
 
 By default, `cozy-stack` comes with a file named [`cozy.example.yaml`](https://github.com/cozy/cozy-stack/blob/master/cozy.example.yaml).
 
-If you need to edit the configuration, we recommend to only copy the 
-needed part in a new file. This new file should be named `cozy.yaml`, 
-`cozy.yml`, or `cozy.json` depending on the format of your chosing, 
+If you need to edit the configuration, we recommend to only copy the
+needed part in a new file. This new file should be named `cozy.yaml`,
+`cozy.yml`, or `cozy.json` depending on the format of your chosing,
 and should be present in one of these directories (ordered by priority):
 
 -   `./.cozy`
@@ -79,8 +79,8 @@ generate this file, you can use the `cozy-stack config passwd [filepath]`
 command. This command will ask you for a passphrase and will create the
 `cozy-admin-passphrase` at the specified path.
 
-You can use the `COZY_ADMIN_PASSWORD` env variable if you do not want to type
-the passphrase each time you call `cozy-stack`.
+You can use the `COZY_ADMIN_PASSPHRASE` (or `COZY_ADMIN_PASSWORD`) env variable
+if you do not want to type the passphrase each time you call `cozy-stack`.
 
 ### Example
 
@@ -147,66 +147,6 @@ couchdb:
 2. each instance document will keep the list index of the CouchDB cluster used
    for its databases, so don't remove a cluster in the middle of the list!
 
-## Hooks
-
-Cozy-stack can run scripts on some events to customize it. The scripts must be
-in the hooks directory defined in the config, have a predefined name, and be
-executable. Then, they should be fired automatically. Let's the available hooks.
-
-The `pre-add-instance` hook is run just before creating an instance. It can
-prevent the command from running by exiting with non-zero status. It can be used
-to check the domain for example. It is called with the following parameter:
-
-1. the domain of the instance that will be created.
-
-The `post-add-instance` hook is run just after an instance has been created.
-installed. It can be used to setup DNS for this instance for example. It is
-called with the following parameter:
-
-1. the domain of the instance that has been created.
-
-The `pre-remove-instance` hook is run just before destroying an instance. It can
-prevent the command from running by exiting with non-zero status. It can be used
-to make a backup of the instance before destroying it. It is called with the
-following parameter:
-
-1. the domain of the instance that will be destroyed.
-
-The `post-remove-instance` hook is run just after an instance has been
-destroyed. It can be used to do some cleanup. It is called with the following
-parameter:
-
-1. the domain of the instance that has been destroyed.
-
-The `pre-install-app` hook is run just before installing an application, and can
-prevent the command from running by exiting with non-zero status. It is called
-with the following parameters:
-
-1. the instance on which the application will be installed
-2. the application name that will be installed.
-
-The `post-install-app` hook is run just after an application has been installed.
-It can be used for logging, notification, statistics, etc. It's also a good
-place to add a vhost for an application in the reverse-proxy configuration, with
-a TLS certificate. It is called with the following parameters:
-
-1. the instance on which the application has been installed
-2. the application name that has been installed.
-
-The `pre-uninstall-app` hook is run just before uninstalling an application, and
-can prevent the command from running by exiting with non-zero status. It is
-called with the following parameters:
-
-1. the instance on which the application will be uninstalled
-2. the application name that will be uninstalled.
-
-The `post-uninstall-app` hook is run just after an application has been
-uninstalled. It can be used for cleaning the configuration of the reverse- proxy
-for example. It is called with the following parameters:
-
-1. the instance on which the application has been uninstalled
-2. the application name that has been uninstalled.
-
 ## OnlyOffice
 
 An integration between Cozy and OnlyOffice has been made. It allows the
@@ -269,6 +209,7 @@ Here are a small list of assets that you may want to customize:
   favicon
 - `/apple-touch-icon.png`: the same but for Apple
 - `/images/default-avatar.png`: the image to use as the default avatar.
-- `/images/default-wallpaper.png`: the image to use as the default wallpapper
+- `/images/default-wallpaper.jpg`: the image to use as the default wallpapper
   on the home.
 - `/images/icon-cozy-home.svg`: the home icon used and displayed by the cozy-bar.
+- `/images/icon-cozy-home-inverted.svg`: the home icon used and displayed by the cozy-bar when using the theme inverted.

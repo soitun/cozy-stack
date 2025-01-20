@@ -2,60 +2,76 @@ package couchdb
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb/mango"
+	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"golang.org/x/sync/errgroup"
 )
 
 // IndexViewsVersion is the version of current definition of views & indexes.
 // This number should be incremented when this file changes.
-const IndexViewsVersion int = 35
+const IndexViewsVersion int = 37
 
 // Indexes is the index list required by an instance to run properly.
 var Indexes = []*mango.Index{
 	// Permissions
-	mango.IndexOnFields(consts.Permissions, "by-source-and-type", []string{"source_id", "type"}),
+	mango.MakeIndex(consts.Permissions, "by-source-and-type", mango.IndexDef{Fields: []string{"source_id", "type"}}),
 
 	// Used to lookup over the children of a directory
-	mango.IndexOnFields(consts.Files, "dir-children", []string{"dir_id", "_id"}),
+	mango.MakeIndex(consts.Files, "dir-children", mango.IndexDef{Fields: []string{"dir_id", "_id"}}),
 	// Used to lookup a directory given its path
-	mango.IndexOnFields(consts.Files, "dir-by-path", []string{"path"}),
+	mango.MakeIndex(consts.Files, "dir-by-path", mango.IndexDef{Fields: []string{"path"}}),
 	// Used to find notes
-	mango.IndexOnFields(consts.Files, "by-mime-updated-at", []string{"mime", "trashed", "updated_at"}),
+	mango.MakeIndex(consts.Files, "by-mime-updated-at", mango.IndexDef{Fields: []string{"mime", "trashed", "updated_at"}}),
 	// Used by the FSCK to detect conflicts
-	mango.IndexOnFields(consts.Files, "with-conflicts", []string{"_conflicts"}),
+	mango.MakeIndex(consts.Files, "with-conflicts", mango.IndexDef{Fields: []string{"_conflicts"}}),
 	// Used to count the shortuts to a sharing that have not been seen
-	mango.IndexOnFields(consts.Files, "by-sharing-status", []string{"metadata.sharing.status"}),
+	mango.MakeIndex(consts.Files, "by-sharing-status", mango.IndexDef{Fields: []string{"metadata.sharing.status"}}),
 	// Used to find old files and directories in the trashed that should be deleted
-	mango.IndexOnFields(consts.Files, "by-dir-id-updated-at", []string{"dir_id", "updated_at"}),
+	mango.MakeIndex(consts.Files, "by-dir-id-updated-at", mango.IndexDef{Fields: []string{"dir_id", "updated_at"}}),
 
 	// Used to lookup a queued and running jobs
-	mango.IndexOnFields(consts.Jobs, "by-worker-and-state", []string{"worker", "state"}),
-	mango.IndexOnFields(consts.Jobs, "by-trigger-id", []string{"trigger_id", "queued_at"}),
-	mango.IndexOnFields(consts.Jobs, "by-queued-at", []string{"queued_at"}),
+	mango.MakeIndex(consts.Jobs, "by-worker-and-state", mango.IndexDef{Fields: []string{"worker", "state"}}),
+	mango.MakeIndex(consts.Jobs, "by-trigger-id", mango.IndexDef{Fields: []string{"trigger_id", "queued_at"}}),
+	mango.MakeIndex(consts.Jobs, "by-queued-at", mango.IndexDef{Fields: []string{"queued_at"}}),
 
 	// Used to lookup a trigger to see if it exists or must be created
-	mango.IndexOnFields(consts.Triggers, "by-worker-and-type", []string{"worker", "type"}),
+	mango.MakeIndex(consts.Triggers, "by-worker-and-type", mango.IndexDef{Fields: []string{"worker", "type"}}),
 
 	// Used to lookup oauth clients by name
-	mango.IndexOnFields(consts.OAuthClients, "by-client-name", []string{"client_name"}),
-	mango.IndexOnFields(consts.OAuthClients, "by-notification-platform", []string{"notification_platform"}),
+	mango.MakeIndex(consts.OAuthClients, "by-client-name", mango.IndexDef{Fields: []string{"client_name"}}),
+	mango.MakeIndex(consts.OAuthClients, "by-notification-platform", mango.IndexDef{Fields: []string{"notification_platform"}}),
+	mango.MakeIndex(consts.OAuthClients, "connected-user-clients", mango.IndexDef{
+		Fields: []string{"client_kind", "client_name"},
+		PartialFilter: mango.And(
+			mango.In("client_kind", []interface{}{"browser", "desktop", "mobile"}),
+			mango.NotExists("pending"),
+		),
+	}),
 
 	// Used to lookup login history by OS, browser, and IP
-	mango.IndexOnFields(consts.SessionsLogins, "by-os-browser-ip", []string{"os", "browser", "ip"}),
+	mango.MakeIndex(consts.SessionsLogins, "by-os-browser-ip", mango.IndexDef{Fields: []string{"os", "browser", "ip"}}),
 
 	// Used to lookup notifications by their source, ordered by their creation
 	// date
-	mango.IndexOnFields(consts.Notifications, "by-source-id", []string{"source_id", "created_at"}),
+	mango.MakeIndex(consts.Notifications, "by-source-id", mango.IndexDef{Fields: []string{"source_id", "created_at"}}),
 
 	// Used to find the myself document
-	mango.IndexOnFields(consts.Contacts, "by-me", []string{"me"}),
+	mango.MakeIndex(consts.Contacts, "by-me", mango.IndexDef{Fields: []string{"me"}}),
 
 	// Used to lookup the bitwarden ciphers
-	mango.IndexOnFields(consts.BitwardenCiphers, "by-folder-id", []string{"folder_id"}),
-	mango.IndexOnFields(consts.BitwardenCiphers, "by-organization-id", []string{"organization_id"}),
+	mango.MakeIndex(consts.BitwardenCiphers, "by-folder-id", mango.IndexDef{Fields: []string{"folder_id"}}),
+	mango.MakeIndex(consts.BitwardenCiphers, "by-organization-id", mango.IndexDef{Fields: []string{"organization_id"}}),
+
+	// Used to find the contacts in a group
+	mango.MakeIndex(consts.Contacts, "by-groups", mango.IndexDef{Fields: []string{"relationships.groups.data"}}),
+
+	// Used to find the active sharings
+	mango.MakeIndex(consts.Sharings, "active", mango.IndexDef{Fields: []string{"active"}}),
 }
 
 // DiskUsageView is the view used for computing the disk usage for files
@@ -300,13 +316,13 @@ func IndexesByDoctype(doctype string) []*mango.Index {
 // globalIndexes is the index list required on the global databases to run
 // properly.
 var globalIndexes = []*mango.Index{
-	mango.IndexOnFields(consts.Exports, "by-domain", []string{"domain", "created_at"}),
+	mango.MakeIndex(consts.Exports, "by-domain", mango.IndexDef{Fields: []string{"domain", "created_at"}}),
 }
 
 // secretIndexes is the index list required on the secret databases to run
 // properly
 var secretIndexes = []*mango.Index{
-	mango.IndexOnFields(consts.AccountTypes, "by-slug", []string{"slug"}),
+	mango.MakeIndex(consts.AccountTypes, "by-slug", mango.IndexDef{Fields: []string{"slug"}}),
 }
 
 // DomainAndAliasesView defines a view to fetch instances by domain and domain
@@ -334,11 +350,34 @@ var globalViews = []*View{
 
 // InitGlobalDB defines views and indexes on the global databases. It is called
 // on every startup of the stack.
-func InitGlobalDB() error {
+func InitGlobalDB(ctx context.Context) error {
+	var err error
+	// Check that we can properly reach CouchDB.
+	attempts := 8
+	attemptsSpacing := 1 * time.Second
+	for i := 0; i < attempts; i++ {
+		_, err = CheckStatus(ctx)
+		if err == nil {
+			break
+		}
+
+		err = fmt.Errorf("could not reach Couchdb database: %w", err)
+		if i < attempts-1 {
+			logger.WithNamespace("stack").Warnf("%s, retrying in %v", err, attemptsSpacing)
+			time.Sleep(attemptsSpacing)
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed contact couchdb: %w", err)
+	}
+
 	g, _ := errgroup.WithContext(context.Background())
+
 	DefineIndexes(g, prefixer.SecretsPrefixer, secretIndexes)
 	DefineIndexes(g, prefixer.GlobalPrefixer, globalIndexes)
 	DefineViews(g, prefixer.GlobalPrefixer, globalViews)
+
 	return g.Wait()
 }
 

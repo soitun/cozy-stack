@@ -19,7 +19,7 @@ import (
 )
 
 func update(inst *instance.Instance) error {
-	if err := inst.Update(); err != nil {
+	if err := instance.Update(inst); err != nil {
 		inst.Logger().Errorf("Could not update: %s", err.Error())
 		return err
 	}
@@ -146,7 +146,7 @@ func checkAliases(inst *instance.Instance, aliases []string) ([]string, error) {
 		if alias == inst.Domain {
 			return nil, instance.ErrExists
 		}
-		other, err := instance.GetFromCouch(alias)
+		other, err := instance.Get(alias)
 		if !errors.Is(err, instance.ErrNotFound) {
 			if err != nil {
 				return nil, err

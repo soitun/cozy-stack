@@ -1,8 +1,6 @@
 package avatar
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -25,7 +23,7 @@ const (
 // Initials is able to generate initial avatar.
 type Initials interface {
 	// Generate will create a new avatar with the given initials and color.
-	Generate(ctx context.Context, initials, color string) ([]byte, error)
+	Generate(initials, color string) ([]byte, error)
 	ContentType() string
 }
 
@@ -36,17 +34,9 @@ type Service struct {
 }
 
 // NewService instantiate a new [Service].
-func NewService(cache cache.Cache, cmd string) (*Service, error) {
-	if cmd == "" {
-		cmd = "convert"
-	}
-
-	initials, err := NewPNGInitials(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create the PNG initials implem: %w", err)
-	}
-
-	return &Service{cache, initials}, nil
+func NewService(cache cache.Cache, cmd string) *Service {
+	initials := NewPNGInitials(cmd)
+	return &Service{cache, initials}
 }
 
 // GenerateInitials an image with the initials for the given name (and the
@@ -65,7 +55,7 @@ func (s *Service) GenerateInitials(publicName string, opts ...Options) ([]byte, 
 		return bytes, contentType, nil
 	}
 
-	bytes, err := s.initials.Generate(context.TODO(), info.initials, info.color)
+	bytes, err := s.initials.Generate(info.initials, info.color)
 	if err != nil {
 		return nil, "", err
 	}

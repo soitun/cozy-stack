@@ -36,8 +36,8 @@ const (
 )
 
 func newStateHolder(domain, redirect, confirm string, provider ProviderOIDC) *stateHolder {
-	id := hex.EncodeToString(crypto.GenerateRandomBytes(16))
-	nonce := hex.EncodeToString(crypto.GenerateRandomBytes(16))
+	id := hex.EncodeToString(crypto.GenerateRandomBytes(24))
+	nonce := hex.EncodeToString(crypto.GenerateRandomBytes(24))
 	return &stateHolder{
 		id:       id,
 		Provider: provider,
@@ -140,7 +140,7 @@ func getStorage() stateStorage {
 	if globalStorage != nil {
 		return globalStorage
 	}
-	cli := config.GetConfig().OauthStateStorage.Client()
+	cli := config.GetConfig().OauthStateStorage
 	if cli == nil {
 		globalStorage = &memStateStorage{
 			states: make(map[string]*stateHolder),

@@ -44,8 +44,21 @@ Content-Type: application/json
   "KdfIterations": 100000,
   "OIDC": false,
   "FranceConnect": false,
+  "locale": "en",
   "magic_link": false,
   "name": "Claude"
 }
 ```
 
+#### Response when the instance has not been onboarded
+
+```http
+HTTP/1.1 412 Precondition failed
+Content-Type: application/json
+```
+
+```json
+{
+  "error": "the instance has not been onboarded"
+}
+```

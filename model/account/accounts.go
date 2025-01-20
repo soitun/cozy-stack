@@ -2,9 +2,11 @@ package account
 
 import (
 	"encoding/json"
+	"errors"
 	"net/url"
 	"time"
 
+	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/model/permission"
@@ -140,7 +142,7 @@ func GetTriggers(jobsSystem job.JobSystem, db prefixer.Prefixer, accountID strin
 
 	var toDelete []job.Trigger
 	for _, t := range triggers {
-		if t.Infos().WorkerType != "konnector" {
+		if !t.Infos().IsKonnectorTrigger() {
 			continue
 		}
 
@@ -276,6 +278,10 @@ func ComputeName(doc couchdb.JSONDoc) {
 func init() {
 	couchdb.AddHook(consts.Accounts, couchdb.EventDelete,
 		func(db prefixer.Prefixer, doc couchdb.Doc, old couchdb.Doc) error {
+			logger.WithDomain(db.DomainName()).
+				WithField("account_id", old.ID()).
+				Info("Executing account deletion hook")
+
 			manualCleaning := false
 			switch v := doc.(type) {
 			case *Account:
@@ -331,8 +337,17 @@ func init() {
 
 			createSoftDeletedAccount(db, old)
 
-			_, err = PushAccountDeletedJob(jobsSystem, db, old.ID(), old.Rev(), konnector)
-			return err
+			// Execute the OnDeleteAccount if the konnector has declared one
+			man, err := app.GetKonnectorBySlug(db, konnector)
+			if man != nil && man.OnDeleteAccount() != "" {
+				_, err = PushAccountDeletedJob(jobsSystem, db, old.ID(), old.Rev(), konnector)
+				return err
+			}
+			if !errors.Is(err, app.ErrNotFound) {
+				return err
+			}
+
+			return nil
 		})
 }
 

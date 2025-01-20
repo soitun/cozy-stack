@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/mail"
@@ -22,8 +24,8 @@ import (
 
 var (
 	dryRunFlag       bool
+	forceFlag        bool
 	withMetadataFlag bool
-	noDryRunFlag     bool
 )
 
 var fixerCmdGroup = &cobra.Command{
@@ -55,7 +57,7 @@ var mimeFixerCmd = &cobra.Command{
 			if class == attrs.Class {
 				return nil
 			}
-			fmt.Printf("Fix %s: %s -> %s\n", attrs.Name, attrs.Class, class)
+			fmt.Fprintf(os.Stdout, "Fix %s: %s -> %s\n", attrs.Name, attrs.Class, class)
 			_, err = c.UpdateAttrsByID(doc.ID, &client.FilePatch{
 				Rev: doc.Rev,
 				Attrs: client.FilePatchAttrs{
@@ -91,7 +93,7 @@ var jobsFixer = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Cleaned %d jobs on %s\n", result.Deleted, args[0])
+		fmt.Fprintf(os.Stdout, "Cleaned %d jobs on %s\n", result.Deleted, args[0])
 		return nil
 	},
 }
@@ -100,9 +102,33 @@ var redisFixer = &cobra.Command{
 	Use:   "redis",
 	Short: "Rebuild scheduling data strucutures in redis",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !forceFlag {
+			if err := askForConfirmation("Rebuild redis on all instances?"); err != nil {
+				return err
+			}
+		}
 		ac := newAdminClient()
 		return ac.RebuildRedis()
 	},
+}
+
+func askForConfirmation(prompt string) error {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Fprintf(os.Stdout, "%s [y/N]: ", prompt)
+
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+
+	response = strings.ToLower(strings.TrimSpace(response))
+
+	if response != "y" && response != "yes" {
+		return errors.New("Aborted")
+	}
+
+	fmt.Println()
+	return nil
 }
 
 var thumbnailsFixer = &cobra.Command{
@@ -227,11 +253,11 @@ var contactEmailsFixer = &cobra.Command{
 						address = strings.TrimSpace(address)
 						_, err := mail.ParseAddress(address)
 						if err == nil {
-							fmt.Printf("    Email fixed: \"%s\" → \"%s\"\n", old, address)
+							fmt.Fprintf(os.Stdout, "    Email fixed: \"%s\" → \"%s\"\n", old, address)
 							changed = true
 							email["address"] = address
 						} else {
-							fmt.Printf("    Invalid email: \"%s\" → \"%s\"\n", old, address)
+							fmt.Fprintf(os.Stdout, "    Invalid email: \"%s\" → \"%s\"\n", old, address)
 						}
 					}
 				}
@@ -271,44 +297,26 @@ var contactEmailsFixer = &cobra.Command{
 	},
 }
 
-var contentMismatch64Kfixer = &cobra.Command{
-	Use:   "content-mismatch <domain>",
-	Short: "Fix the content mismatch differences for 64K issue",
+var passwordDefinedFixer = &cobra.Command{
+	Use:   "password-defined <domain>",
+	Short: "Set the password_defined setting",
+	Long: `
+A password_defined field has been added to the io.cozy.settings.instance
+(available on GET /settings/instance). This fixer can fill it for existing Cozy
+instances if it was missing.
+`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 {
+		if len(args) != 1 {
 			return cmd.Usage()
 		}
-
 		domain := args[0]
-
-		buf := new(bytes.Buffer)
-		body := struct {
-			DryRun bool `json:"dry_run"`
-		}{
-			DryRun: !noDryRunFlag,
-		}
-
-		if err := json.NewEncoder(buf).Encode(body); err != nil {
-			return err
-		}
-
 		c := newAdminClient()
-		res, err := c.Req(&request.Options{
+		path := fmt.Sprintf("/instances/%s/fixers/password-defined", domain)
+		_, err := c.Req(&request.Options{
 			Method: "POST",
-			Path:   "/instances/" + url.PathEscape(domain) + "/fixers/content-mismatch",
-			Body:   bytes.NewReader(buf.Bytes()),
+			Path:   path,
 		})
-		if err != nil {
-			return err
-		}
-
-		out, err := io.ReadAll(res.Body)
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-
-		return nil
+		return err
 	},
 }
 
@@ -394,14 +402,14 @@ this instance are correctly set.
 func init() {
 	thumbnailsFixer.Flags().BoolVar(&dryRunFlag, "dry-run", false, "Dry run")
 	thumbnailsFixer.Flags().BoolVar(&withMetadataFlag, "with-metadata", false, "Recalculate images metadata")
-	contentMismatch64Kfixer.Flags().BoolVar(&noDryRunFlag, "no-dry-run", false, "Do not dry run")
+	redisFixer.Flags().BoolVar(&forceFlag, "force", false, "Do not ask for confirmation before fixing redis on all instances")
 
 	fixerCmdGroup.AddCommand(jobsFixer)
 	fixerCmdGroup.AddCommand(mimeFixerCmd)
 	fixerCmdGroup.AddCommand(redisFixer)
 	fixerCmdGroup.AddCommand(thumbnailsFixer)
 	fixerCmdGroup.AddCommand(contactEmailsFixer)
-	fixerCmdGroup.AddCommand(contentMismatch64Kfixer)
+	fixerCmdGroup.AddCommand(passwordDefinedFixer)
 	fixerCmdGroup.AddCommand(orphanAccountFixer)
 	fixerCmdGroup.AddCommand(serviceTriggersFixer)
 	fixerCmdGroup.AddCommand(indexesFixer)

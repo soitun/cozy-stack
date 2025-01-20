@@ -83,6 +83,27 @@ Content-Type: application/vnd.api+json
 }
 ```
 
+### GET /instances/count
+
+Returns the count of all instances.
+
+#### Request
+
+```http
+GET /instances/count HTTP/1.1
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{"count":259}
+```
+
 ### GET /instances/:domain/last-activity
 
 It returns an approximate date of when the instance was last used by their
@@ -231,6 +252,64 @@ Content-Type: application/json
 }
 ```
 
+### POST /instances/:domain/session_code/check
+
+Checks that a session_code is valid for the given instance. Note that the
+session_code will be invalidated after that.
+
+#### Request
+
+```http
+POST /instances/alice.cozy.localhost/session_code/check HTTP/1.1
+Content-Type: application/json
+```
+
+```json
+{
+  "session_code": "L7oJ6BDQtdbLR5Vr5vTxTXLJ1pQzMXcD"
+}
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{
+  "valid": true
+}
+```
+
+### POST /instances/:domain/email_verified_code
+
+Creates an email_verified_code that can be used on the given instance to avoid
+the 2FA by email.
+
+#### Request
+
+```http
+POST /instances/alice.cozy.localhost/email_verified_code HTTP/1.1
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{
+  "email_verified_code": "jBPF5Kvpv1oztdaSgdA2315hVpAf6BCd"
+}
+```
+
+Note: if the two factor authentication by email is not enabled on this
+instance, it will return a 400 Bad Request error.
+
 ### DELETE /instances/:domain/sessions
 
 Delete the databases for io.cozy.sessions and io.cozy.sessions.logins.
@@ -295,6 +374,17 @@ Content-Type: application/json
   ],
   "domain": "alice.cozy.localhost"
 }
+```
+
+### POST /instances/:domain/fixers/password-defined
+
+Fill the `password_defined` field of the io.cozy.settings.instance if it was
+missing.
+
+#### Request
+
+```http
+POST /instances/alice.cozy.localhost/fixers/password-defined HTTP/1.1
 ```
 
 ### POST /instances/:domain/fixers/orphan-account
@@ -392,6 +482,70 @@ GET /instances/alice.cozy.localhost/exports/123123/data?cursor=io.cozy.files%2Fa
 HTTP/1.1 200 OK
 Content-Type: application/zip
 Content-Disposition: attachment; filename="alice.cozy.localhost - part001.zip"
+```
+
+### POST /instances/:domain/notifications
+
+This endpoint allows to send a notification via the notification center. Both
+the notification declaration and its properties need to be passed in the body.
+These notifications cannot use templates defined in cozy-stack though so their
+e-mail content must be provided directly (at least in HTML).
+
+When the request is successful, the generated notification object is returned.
+
+```http
+POST /instances/alice.cozy.localhost/notifications HTTP/1.1
+Authorization: Bearer ...
+Content-Type: application/json
+```
+
+```json
+{
+    "notification": {
+        "category": "account-balance",
+        "category_id": "my-bank",
+        "title": "Your account balance is not OK",
+        "message": "Warning: we have detected a negative balance in your my-bank",
+        "priority": "high",
+        "state": "-1",
+        "preferred_channels": ["mobile"],
+        "content": "Hello,\r\nWe have detected a negative balance in your my-bank account.",
+        "content_html": "<html>\r\n\t<body>\r\n\t<p>Hello,<br/>We have detected a negative balance in your my-bank account.</p>\r\n\t</body>\r\n\t</html>"
+    },
+    "properties": {
+        "description": "Alert the user when its account balance is negative",
+        "collapsible": true,
+        "multiple": true,
+        "stateful": true,
+        "default_priority": "high"
+    }
+}
+```
+
+#### Response
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+```
+
+```json
+{
+    "_id": "c57a548c-7602-11e7-933b-6f27603d27da",
+    "_rev": "1-1f2903f9a867",
+    "source_id": "cozy/cli//account-balance/my-bank",
+    "originator": "cli",
+    "category": "account-balance",
+    "category_id": "my-bank",
+    "created_at": "2024-01-04T15:23:01.832Z",
+    "last_sent": "2024-01-04T15:23:01.832Z",
+    "title": "Your account balance is not OK",
+    "message": "Warning: we have detected a negative balance in your my-bank",
+    "priority": "high",
+    "state": "-1",
+    "content": "Hello,\r\nWe have detected a negative balance in your my-bank account.",
+    "contentHTML": "<html>\r\n\t<body>\r\n\t<p>Hello,<br/>We have detected a negative balance in your my-bank account.</p>\r\n\t</body>\r\n\t</html>"
+}
 ```
 
 ## Contexts

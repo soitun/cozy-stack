@@ -130,6 +130,15 @@ func (d *Document) Markdown(images []*Image) ([]byte, error) {
 	return []byte(md), nil
 }
 
+func (d *Document) Text() (string, error) {
+	content, err := d.Content()
+	if err != nil {
+		return "", err
+	}
+	text := textSerializer().Serialize(content)
+	return text, nil
+}
+
 // GetDirID returns the ID of the directory where the note will be created.
 func (d *Document) GetDirID(inst *instance.Instance) (string, error) {
 	if d.DirID != "" {
@@ -146,7 +155,7 @@ func (d *Document) GetDirID(inst *instance.Instance) (string, error) {
 func (d *Document) asFile(inst *instance.Instance, old *vfs.FileDoc) *vfs.FileDoc {
 	now := time.Now()
 	file := old.Clone().(*vfs.FileDoc)
-	file.Metadata = d.Metadata()
+	vfs.MergeMetadata(file, d.Metadata())
 	file.Mime = consts.NoteMimeType
 	file.MD5Sum = nil // Let the VFS compute the md5sum
 
@@ -181,17 +190,25 @@ func Create(inst *instance.Instance, doc *Document) (*vfs.FileDoc, error) {
 	defer lock.Unlock()
 
 	doc.Version = 0
-	content, err := initialContent(inst, doc)
-	if err != nil {
-		return nil, err
+	if len(doc.RawContent) > 0 {
+		// Check that the content satisfies the schema
+		_, err := doc.Content()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		content, err := initialContent(inst, doc)
+		if err != nil {
+			return nil, err
+		}
+		doc.SetContent(content)
 	}
-	doc.SetContent(content)
 
 	file, err := writeFile(inst, doc, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := setupTrigger(inst, file.ID()); err != nil {
+	if err := SetupTrigger(inst, file.ID()); err != nil {
 		return nil, err
 	}
 	return file, nil
@@ -324,7 +341,7 @@ type DebounceMessage struct {
 	NoteID string `json:"note_id"`
 }
 
-func setupTrigger(inst *instance.Instance, fileID string) error {
+func SetupTrigger(inst *instance.Instance, fileID string) error {
 	sched := job.System()
 	infos := job.TriggerInfos{
 		Type:       "@event",
@@ -355,7 +372,7 @@ func writeFile(inst *instance.Instance, doc *Document, oldDoc *vfs.FileDoc) (fil
 	if oldDoc == nil {
 		fileDoc, err = newFileDoc(inst, doc)
 		if err != nil {
-			return
+			return nil, err
 		}
 	} else {
 		fileDoc = doc.asFile(inst, oldDoc)
@@ -386,7 +403,7 @@ func writeFile(inst *instance.Instance, doc *Document, oldDoc *vfs.FileDoc) (fil
 		if err == nil {
 			break
 		} else if !errors.Is(err, os.ErrExist) {
-			return
+			return nil, err
 		}
 		filename := strings.TrimSuffix(path.Base(basename), path.Ext(basename))
 		fileDoc.DocName = fmt.Sprintf("%s (%d).cozy-note", filename, i)
@@ -404,7 +421,7 @@ func writeFile(inst *instance.Instance, doc *Document, oldDoc *vfs.FileDoc) (fil
 			_ = saveToCache(inst, doc)
 		}
 	}
-	return
+	return fileDoc, err
 }
 
 // forceRename will update the FileDoc in CouchDB with the new name (but the
@@ -537,7 +554,7 @@ func UpdateMetadataFromCache(inst *instance.Instance, docs []*vfs.FileDoc) {
 		}
 		var note Document
 		if err := json.Unmarshal(buf, &note); err == nil {
-			docs[i].Metadata = note.Metadata()
+			vfs.MergeMetadata(docs[i], note.Metadata())
 		}
 	}
 }
@@ -657,6 +674,21 @@ func getListFromCache(inst *instance.Instance) []string {
 	return fileIDs
 }
 
+func GetText(inst *instance.Instance, file *vfs.FileDoc) (string, error) {
+	lock := inst.NotesLock()
+	if err := lock.Lock(); err != nil {
+		return "", err
+	}
+	defer lock.Unlock()
+
+	doc, err := get(inst, file)
+	if err != nil {
+		return "", err
+	}
+
+	return doc.Text()
+}
+
 // UpdateTitle changes the title of a note and renames the associated file.
 func UpdateTitle(inst *instance.Instance, file *vfs.FileDoc, title, sessionID string) (*vfs.FileDoc, error) {
 	lock := inst.NotesLock()
@@ -748,7 +780,7 @@ func UpdateSchema(inst *instance.Instance, file *vfs.FileDoc, schema map[string]
 				}
 				stack := make([]byte, 4<<10) // 4 KB
 				length := runtime.Stack(stack, false)
-				log := inst.Logger().WithField("panic", true).WithNamespace("note")
+				log := inst.Logger().WithNamespace("note").WithField("panic", true)
 				log.Errorf("PANIC RECOVER %s: %s", err.Error(), stack[:length])
 			}
 		}()

@@ -4,9 +4,13 @@ on:
     branches:
       - master
     paths:
+      - 'scripts/eslintrc.json'
+      - 'scripts/package.json'
       - '**.js'
   pull_request:
     paths:
+      - 'scripts/eslintrc.json'
+      - 'scripts/package.json'
       - '**.js'
 permissions:
   contents: read
@@ -15,17 +19,13 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 16
-      - name: Yarn install 
+          node-version: 20
+      - name: Npm install
         run: |
           cd ./scripts
-          yarn install
-      - uses: sibiraj-s/action-eslint@v2
-        with:
-          eslint-args: '--config scripts/eslintrc.json --ignore-path=.gitignore --quiet'
-          extensions: 'js,jsx,ts,tsx'
-          bin-path: 'scripts/node_modules/eslint/bin'
-          annotations: true
+          npm install
+      - name: Run eslint
+        run: make jslint

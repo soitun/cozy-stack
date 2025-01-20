@@ -18,7 +18,7 @@ func Test_archive(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	setup := testutils.NewSetup(t, t.Name())
 
 	inst := setup.GetTestInstance()
@@ -87,7 +87,7 @@ func Test_archive(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NoError(t, file.Close())
 
-		files := map[string]string{
+		files := map[string]interface{}{
 			"wet-cozy.jpg": one.ID(),
 			"hello.txt":    two.ID(),
 		}

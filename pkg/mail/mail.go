@@ -10,12 +10,17 @@ const (
 	// ModeFromStack is the no-reply mode of a mail, to send mail "to" the
 	// user's mail, as a noreply@
 	ModeFromStack = "noreply"
+	// ModePendingEmail is used to send an email to confirm the new email
+	// address of the user
+	ModePendingEmail = "pending"
 	// ModeFromUser is the "from" mode of a mail, to send mail "from" the user's
 	// mail.
 	ModeFromUser = "from"
 	// ModeSupport is used to send both a request to the support and a
 	// confirmation to the user.
 	ModeSupport = "support"
+	// ModeCampaign is used to send a non transactional email to the user
+	ModeCampaign = "campaign"
 
 	// DefaultLayout defines the default MJML layout to use
 	DefaultLayout = "layout"

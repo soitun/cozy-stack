@@ -2,6 +2,8 @@
 package auth
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,13 +14,13 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/session"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	build "github.com/cozy/cozy-stack/pkg/config"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/limits"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/labstack/echo/v4"
-	"github.com/mssola/user_agent"
 )
 
 const (
@@ -59,14 +61,7 @@ func Home(c echo.Context) error {
 
 	if len(instance.RegisterToken) > 0 && !instance.OnboardingFinished {
 		if !middlewares.CheckRegisterToken(c, instance) {
-			return c.Render(http.StatusOK, "need_onboarding.html", echo.Map{
-				"Domain":       instance.ContextualDomain(),
-				"ContextName":  instance.ContextName,
-				"Locale":       instance.Locale,
-				"Title":        instance.TemplateTitle(),
-				"Favicon":      middlewares.Favicon(instance),
-				"SupportEmail": instance.SupportEmailAddress(),
-			})
+			return middlewares.RenderNeedOnboarding(c, instance)
 		}
 		return c.Redirect(http.StatusSeeOther, instance.PageURL("/auth/passphrase", c.QueryParams()))
 	}
@@ -94,9 +89,12 @@ func Home(c echo.Context) error {
 		}
 	}
 
-	var params url.Values
+	params := make(url.Values)
 	if jwt := c.QueryParam("jwt"); jwt != "" {
-		params = url.Values{"jwt": {jwt}}
+		params.Add("jwt", jwt)
+	}
+	if code := c.QueryParam("email_verified_code"); code != "" {
+		params.Add("email_verified_code", code)
 	}
 	return c.Redirect(http.StatusSeeOther, instance.PageURL("/auth/login", params))
 }
@@ -120,6 +118,13 @@ func SetCookieForNewSession(c echo.Context, duration session.Duration) (string, 
 func isTrustedDevice(c echo.Context, inst *instance.Instance) bool {
 	trustedDeviceToken := []byte(c.FormValue("trusted-device-token"))
 	return inst.ValidateTwoFactorTrustedDeviceSecret(c.Request(), trustedDeviceToken)
+}
+
+// hasEmailVerified checks if the email has already been verified, and if it is
+// the case, the stack can skip the 2FA by email.
+func hasEmailVerified(c echo.Context, inst *instance.Instance) bool {
+	code := c.FormValue("email_verified_code")
+	return inst.CheckEmailVerifiedCode(code)
 }
 
 func getLogoutURL(context string) string {
@@ -157,7 +162,7 @@ func renderLoginForm(c echo.Context, i *instance.Instance, code int, credsErrors
 	}
 	hasFranceConnect := i.FranceConnectID != ""
 
-	publicName, err := i.PublicName()
+	publicName, err := csettings.PublicName(i)
 	if err != nil {
 		publicName = ""
 	}
@@ -194,24 +199,39 @@ func renderLoginForm(c echo.Context, i *instance.Instance, code int, credsErrors
 		iterations = settings.PassphraseKdfIterations
 	}
 
+	// When we have an email_verified_code, we need to ask the user their
+	// password, not send them an email with a magic link
+	emailVerifiedCode := c.QueryParam("email_verified_code")
+	magicLink := i.MagicLink
+	if emailVerifiedCode != "" {
+		magicLink = false
+	}
+
+	dataProxyCleanURL := i.DataProxyCleanURL()
+	csp := c.Response().Header().Get(echo.HeaderContentSecurityPolicy)
+	csp = strings.Replace(csp, "frame-src 'none'", "frame-src "+dataProxyCleanURL+" ", 1)
+	c.Response().Header().Set(echo.HeaderContentSecurityPolicy, csp)
+
 	return c.Render(code, "login.html", echo.Map{
-		"TemplateTitle":    i.TemplateTitle(),
-		"Domain":           i.ContextualDomain(),
-		"ContextName":      i.ContextName,
-		"Locale":           i.Locale,
-		"Favicon":          middlewares.Favicon(i),
-		"CryptoPolyfill":   middlewares.CryptoPolyfill(c),
-		"BottomNavBar":     middlewares.BottomNavigationBar(c),
-		"Iterations":       iterations,
-		"Salt":             string(i.PassphraseSalt()),
-		"Title":            title,
-		"PasswordHelp":     help,
-		"CredentialsError": credsErrors,
-		"Redirect":         redirectStr,
-		"CSRF":             c.Get("csrf"),
-		"MagicLink":        i.MagicLink,
-		"OAuth":            hasOAuth,
-		"FranceConnect":    hasFranceConnect,
+		"TemplateTitle":     i.TemplateTitle(),
+		"Domain":            i.ContextualDomain(),
+		"ContextName":       i.ContextName,
+		"Locale":            i.Locale,
+		"Favicon":           middlewares.Favicon(i),
+		"CryptoPolyfill":    middlewares.CryptoPolyfill(c),
+		"BottomNavBar":      middlewares.BottomNavigationBar(c),
+		"Iterations":        iterations,
+		"Salt":              string(i.PassphraseSalt()),
+		"Title":             title,
+		"PasswordHelp":      help,
+		"CredentialsError":  credsErrors,
+		"Redirect":          redirectStr,
+		"CSRF":              c.Get("csrf"),
+		"EmailVerifiedCode": emailVerifiedCode,
+		"MagicLink":         magicLink,
+		"OAuth":             hasOAuth,
+		"FranceConnect":     hasFranceConnect,
+		"DataProxyCleanURL": dataProxyCleanURL,
 	})
 }
 
@@ -301,7 +321,7 @@ func migrateToHashedPassphrase(inst *instance.Instance, settings *settings.Setti
 	}
 	settings.PublicKey = pubKey
 	settings.PrivateKey = privKey
-	if err := inst.Update(); err != nil {
+	if err := instance.Update(inst); err != nil {
 		inst.Logger().Errorf("Could not update: %s", err.Error())
 	}
 	if err := settings.Save(inst); err != nil {
@@ -324,13 +344,8 @@ func login(c echo.Context) error {
 	sess, ok := middlewares.GetSession(c)
 	if ok { // The user was already logged-in
 		sessionID = sess.ID()
-	} else if lifecycle.CheckPassphrase(inst, passphrase) == nil {
-		ua := user_agent.New(c.Request().UserAgent())
-		browser, _ := ua.Browser()
+	} else if instance.CheckPassphrase(inst, passphrase) == nil {
 		iterations := crypto.DefaultPBKDF2Iterations
-		if browser == "Edge" {
-			iterations = crypto.EdgePBKDF2Iterations
-		}
 		settings, err := settings.Get(inst)
 		// If the passphrase was not yet hashed on the client side, migrate it
 		if err == nil && settings.PassphraseKdfIterations == 0 {
@@ -341,7 +356,8 @@ func login(c echo.Context) error {
 		// check that the mail has been confirmed. If not, 2FA is not
 		// activated.
 		// If device is trusted, skip the 2FA.
-		if inst.HasAuthMode(instance.TwoFactorMail) && !isTrustedDevice(c, inst) {
+		// If the email has already been verified, skip the 2FA too.
+		if inst.HasAuthMode(instance.TwoFactorMail) && !isTrustedDevice(c, inst) && !hasEmailVerified(c, inst) {
 			twoFactorToken, err := lifecycle.SendTwoFactorPasscode(inst)
 			if err != nil {
 				return err
@@ -560,6 +576,34 @@ func AppRedirection(inst *instance.Instance, redirect string) (*url.URL, error) 
 	return u, nil
 }
 
+func resendActivationMail(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	rate := config.GetRateLimiter()
+	if err := rate.CheckRateLimit(inst, limits.ResendOnboardingMailType); err == nil {
+		client := instance.APIManagerClient(inst)
+		if len(inst.RegisterToken) == 0 || inst.UUID == "" || client == nil {
+			return errors.New("cannot resend activation link")
+		}
+		url := fmt.Sprintf("/api/v1/instances/%s/resend", url.PathEscape(inst.UUID))
+		if err := client.Post(url, nil); err != nil {
+			return errors.New("cannot resend activation link")
+		}
+	}
+	return c.Render(http.StatusOK, "error.html", echo.Map{
+		"Domain":       inst.ContextualDomain(),
+		"ContextName":  inst.ContextName,
+		"Locale":       inst.Locale,
+		"Title":        inst.TemplateTitle(),
+		"Favicon":      middlewares.Favicon(inst),
+		"Inverted":     true,
+		"Illustration": "/images/mail-sent.svg",
+		"ErrorTitle":   "Onboarding Resend activation Title",
+		"Error":        "Onboarding Resend activation Body",
+		"ErrorDetail":  "Onboarding Resend activation Detail",
+		"SupportEmail": inst.SupportEmailAddress(),
+	})
+}
+
 // Routes sets the routing for the status service
 func Routes(router *echo.Group) {
 	noCSRF := middlewares.CSRFWithConfig(middlewares.CSRFConfig{
@@ -593,6 +637,7 @@ func Routes(router *echo.Group) {
 	router.POST("/passphrase_renew", passphraseRenew, noCSRF)
 	router.GET("/passphrase", passphraseForm, noCSRF)
 	router.POST("/hint", sendHint)
+	router.POST("/onboarding/resend", resendActivationMail)
 
 	// Confirmation by typing
 	router.GET("/confirm", confirmForm, noCSRF)
@@ -602,24 +647,17 @@ func Routes(router *echo.Group) {
 	// Register OAuth clients
 	router.POST("/register", registerClient, middlewares.AcceptJSON, middlewares.ContentTypeJSON)
 	router.GET("/register/:client-id", readClient, middlewares.AcceptJSON, checkRegistrationToken)
-	router.PUT("/register/:client-id", updateClient, middlewares.AcceptJSON, middlewares.ContentTypeJSON, checkRegistrationToken)
+	router.PUT("/register/:client-id", updateClient, middlewares.AcceptJSON, middlewares.ContentTypeJSON)
 	router.DELETE("/register/:client-id", deleteClient)
 	router.POST("/clients/:client-id/challenge", postChallenge, checkRegistrationToken)
 	router.POST("/clients/:client-id/attestation", postAttestation)
 	router.POST("/clients/:client-id/flagship", confirmFlagship)
 
 	// OAuth flow
-	authorizeGroup := router.Group("/authorize", noCSRF)
-	authorizeGroup.GET("", authorizeForm)
-	authorizeGroup.POST("", authorize)
-	authorizeGroup.GET("/sharing", authorizeSharingForm)
-	authorizeGroup.POST("/sharing", authorizeSharing)
-	authorizeGroup.GET("/sharing/:sharing-id/cancel", cancelAuthorizeSharing)
-	authorizeGroup.GET("/move", authorizeMoveForm)
-	authorizeGroup.POST("/move", authorizeMove)
+	authHandler := NewAuthorizeHandler(config.GetConfig().DeprecatedApps)
+	authHandler.Register(router.Group("/authorize", noCSRF))
 
 	router.POST("/access_token", accessToken)
-	router.POST("/secret_exchange", secretExchange)
 
 	// Flagship app
 	router.POST("/session_code", CreateSessionCode)
@@ -628,4 +666,7 @@ func Routes(router *echo.Group) {
 	// 2FA
 	router.GET("/twofactor", twoFactorForm)
 	router.POST("/twofactor", twoFactor)
+
+	// Share by link protected by password
+	router.POST("/share-by-link/password", checkPasswordForShareByLink)
 }

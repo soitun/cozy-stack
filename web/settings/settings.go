@@ -4,15 +4,25 @@ package settings
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
+	"github.com/cozy/cozy-stack/model/feature"
+	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/session"
+	csettings "github.com/cozy/cozy-stack/model/settings"
+	"github.com/cozy/cozy-stack/model/token"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/labstack/echo/v4"
+	"github.com/mssola/user_agent"
 )
 
 type apiSession struct {
@@ -30,7 +40,17 @@ func (s *apiSession) Included() []jsonapi.Object             { return nil }
 func (s *apiSession) Links() *jsonapi.LinksList              { return nil }
 func (s *apiSession) MarshalJSON() ([]byte, error)           { return json.Marshal(s.s) }
 
-func getSessions(c echo.Context) error {
+// HTTPHandler handle all the `/settings` routes.
+type HTTPHandler struct {
+	svc csettings.Service
+}
+
+// NewHTTPHandler instantiates a new [HTTPHandler].
+func NewHTTPHandler(svc csettings.Service) *HTTPHandler {
+	return &HTTPHandler{svc}
+}
+
+func (h *HTTPHandler) getSessions(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	if err := middlewares.AllowWholeType(c, permission.GET, consts.Sessions); err != nil {
@@ -50,7 +70,15 @@ func getSessions(c echo.Context) error {
 	return jsonapi.DataList(c, http.StatusOK, objs, nil)
 }
 
-func warnings(c echo.Context) error {
+func (h *HTTPHandler) getCurrentSession(c echo.Context) error {
+	sess, ok := middlewares.GetSession(c)
+	if !ok {
+		return jsonapi.NotFound(errors.New("no current session"))
+	}
+	return jsonapi.Data(c, http.StatusOK, &apiSession{sess}, nil)
+}
+
+func (h *HTTPHandler) listWarnings(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	// Any request with a token can ask for the context (no permissions are required)
@@ -58,12 +86,9 @@ func warnings(c echo.Context) error {
 		return err
 	}
 
-	warnings := inst.Warnings()
-	if warnings == nil {
-		warnings = []*jsonapi.Error{}
-	}
+	w := middlewares.ListWarnings(inst)
 
-	if len(warnings) == 0 {
+	if len(w) == 0 {
 		// Sends a 404 when there is no warnings
 		resp := c.Response()
 		resp.Header().Set(echo.HeaderContentType, jsonapi.ContentType)
@@ -72,7 +97,156 @@ func warnings(c echo.Context) error {
 		return err
 	}
 
-	return jsonapi.DataErrorList(c, warnings...)
+	return jsonapi.DataErrorList(c, w...)
+}
+
+// postEmail handle POST /settings/email
+func (h *HTTPHandler) postEmail(c echo.Context) error {
+	type body struct {
+		Passphrase string `json:"passphrase"`
+		Email      string `json:"email"`
+	}
+
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.Settings); err != nil {
+		return err
+	}
+
+	var args body
+	err := c.Bind(&args)
+	if err != nil {
+		return jsonapi.BadJSON()
+	}
+
+	inst := middlewares.GetInstance(c)
+
+	err = h.svc.StartEmailUpdate(inst, &csettings.UpdateEmailCmd{
+		Passphrase: []byte(args.Passphrase),
+		Email:      args.Email,
+	})
+
+	switch {
+	case err == nil:
+		c.NoContent(http.StatusNoContent)
+		return nil
+	case errors.Is(err, instance.ErrInvalidPassphrase):
+		return jsonapi.BadRequest(instance.ErrInvalidPassphrase)
+	default:
+		return jsonapi.InternalServerError(err)
+	}
+}
+
+// postEmailResend handle POST /settings/email/resend
+func (h *HTTPHandler) postEmailResend(c echo.Context) error {
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.Settings); err != nil {
+		return err
+	}
+
+	inst := middlewares.GetInstance(c)
+
+	err := h.svc.ResendEmailUpdate(inst)
+
+	switch {
+	case err == nil:
+		c.NoContent(http.StatusNoContent)
+		return nil
+	case errors.Is(err, instance.ErrInvalidPassphrase):
+		return jsonapi.BadRequest(instance.ErrInvalidPassphrase)
+	default:
+		return jsonapi.InternalServerError(err)
+	}
+}
+
+// deleteEmail handle DELETE /settings/email
+func (h *HTTPHandler) deleteEmail(c echo.Context) error {
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.Settings); err != nil {
+		return err
+	}
+
+	inst := middlewares.GetInstance(c)
+
+	err := h.svc.CancelEmailUpdate(inst)
+	switch {
+	case err == nil:
+		c.NoContent(http.StatusNoContent)
+		return nil
+	case errors.Is(err, csettings.ErrNoPendingEmail):
+		return jsonapi.BadRequest(csettings.ErrNoPendingEmail)
+	default:
+		return jsonapi.InternalServerError(err)
+	}
+}
+
+func (h *HTTPHandler) getEmailConfirmation(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	if !middlewares.IsLoggedIn(c) {
+		u := inst.PageURL("/auth/login", url.Values{
+			"redirect": {inst.FromURL(c.Request().URL)},
+		})
+		return c.Redirect(http.StatusSeeOther, u)
+	}
+
+	tok := c.QueryParam("token")
+	settingsURL := inst.SubDomain("settings").String()
+
+	err := h.svc.ConfirmEmailUpdate(inst, tok)
+	switch {
+	case err == nil:
+		// Redirect to the setting page
+		return c.Redirect(http.StatusTemporaryRedirect, settingsURL)
+	case errors.Is(err, csettings.ErrNoPendingEmail), errors.Is(err, token.ErrInvalidToken):
+		return c.Render(http.StatusBadRequest, "error.html", echo.Map{
+			"Domain":       inst.ContextualDomain(),
+			"ContextName":  inst.ContextName,
+			"Locale":       inst.Locale,
+			"Title":        inst.TemplateTitle(),
+			"Favicon":      middlewares.Favicon(inst),
+			"Illustration": "/images/generic-error.svg",
+			"ErrorTitle":   "Error InvalidToken Title",
+			"Error":        "Error InvalidToken Message",
+			"Link":         "Error InvalidToken Link",
+			"LinkURL":      settingsURL,
+			"SupportEmail": inst.SupportEmailAddress(),
+		})
+	default:
+		return echo.NewHTTPError(http.StatusInternalServerError, err)
+	}
+}
+
+func (h *HTTPHandler) installFlagshipApp(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	rawUserAgent := c.Request().UserAgent()
+	ua := user_agent.New(rawUserAgent)
+	platform := strings.ToLower(ua.Platform())
+	os := strings.ToLower(ua.OS())
+	flags, err := feature.GetFlags(inst)
+	if err != nil {
+		return err
+	}
+
+	storeLink := "https://cozy.io/" + inst.Locale + "/download"
+	if strings.Contains(platform, "iphone") || strings.Contains(platform, "ipad") {
+		id, ok := flags.M["flagship.appstore_id"].(string)
+		if !ok {
+			id = "id1600636174"
+		}
+		storeLink = fmt.Sprintf("https://apps.apple.com/%s/app/%s", inst.Locale, id)
+	} else if strings.Contains(platform, "android") || strings.Contains(os, "android") {
+		id, ok := flags.M["flagship.playstore_id"].(string)
+		if !ok {
+			id = "io.cozy.flagship.mobile"
+		}
+		storeLink = fmt.Sprintf("https://play.google.com/store/apps/details?id=%s&hl=%s", id, inst.Locale)
+	}
+
+	return c.Render(http.StatusOK, "install_flagship_app.html", echo.Map{
+		"Domain":      inst.ContextualDomain(),
+		"ContextName": inst.ContextName,
+		"Locale":      inst.Locale,
+		"Title":       inst.TemplateTitle(),
+		"Favicon":     middlewares.Favicon(inst),
+		"StoreLink":   storeLink,
+		"SkipLink":    inst.OnboardedRedirection().String(),
+	})
 }
 
 func isMovedError(err error) bool {
@@ -80,35 +254,73 @@ func isMovedError(err error) bool {
 	return ok && j.Code == "moved"
 }
 
-// Routes sets the routing for the settings service
-func Routes(router *echo.Group) {
-	router.GET("/disk-usage", diskUsage)
+func (h *HTTPHandler) UploadAvatar(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	if err := middlewares.AllowWholeType(c, http.MethodPut, consts.Settings); err != nil {
+		return err
+	}
+	header := c.Request().Header
+	size := c.Request().ContentLength
+	if size > 20_000_000 {
+		return jsonapi.Errorf(http.StatusRequestEntityTooLarge, "Avatar is too big")
+	}
+	contentType := header.Get(echo.HeaderContentType)
+	f, err := inst.AvatarFS().CreateAvatar(contentType)
+	if err != nil {
+		return jsonapi.InternalServerError(err)
+	}
+	_, err = io.Copy(f, c.Request().Body)
+	if cerr := f.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return jsonapi.InternalServerError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
 
-	router.GET("/passphrase", getPassphraseParameters)
-	router.POST("/passphrase", registerPassphrase)
-	router.POST("/passphrase/flagship", registerPassphraseFlagship)
-	router.PUT("/passphrase", updatePassphrase)
-	router.POST("/passphrase/check", checkPassphrase)
-	router.GET("/hint", getHint)
-	router.PUT("/hint", updateHint)
+// Register all the `/settings` routes to the given router.
+func (h *HTTPHandler) Register(router *echo.Group) {
+	router.GET("/disk-usage", h.diskUsage)
+	router.GET("/clients-usage", h.clientsUsage)
 
-	router.GET("/capabilities", getCapabilities)
-	router.GET("/instance", getInstance)
-	router.PUT("/instance", updateInstance)
-	router.POST("/instance/deletion", askInstanceDeletion)
-	router.PUT("/instance/auth_mode", updateInstanceAuthMode)
-	router.PUT("/instance/sign_tos", updateInstanceTOS)
-	router.DELETE("/instance/moved_from", clearMovedFrom)
+	router.POST("/email", h.postEmail)
+	router.POST("/email/resend", h.postEmailResend)
+	router.DELETE("/email", h.deleteEmail)
+	router.GET("/email/confirm", h.getEmailConfirmation)
 
-	router.GET("/flags", getFlags)
+	router.GET("/passphrase", h.getPassphraseParameters)
+	router.POST("/passphrase", h.registerPassphrase)
+	router.POST("/passphrase/flagship", h.registerPassphraseFlagship)
+	router.PUT("/passphrase", h.updatePassphrase)
+	router.POST("/passphrase/check", h.checkPassphrase)
+	router.GET("/hint", h.getHint)
+	router.PUT("/hint", h.updateHint)
+	router.POST("/vault", h.createVault)
 
-	router.GET("/sessions", getSessions)
+	router.GET("/capabilities", h.getCapabilities)
+	router.GET("/external-ties", h.getExternalTies)
+	router.GET("/instance", h.getInstance)
+	router.PUT("/instance", h.updateInstance)
+	router.POST("/instance/deletion", h.askInstanceDeletion)
+	router.PUT("/instance/auth_mode", h.updateInstanceAuthMode)
+	router.PUT("/instance/sign_tos", h.updateInstanceTOS)
+	router.DELETE("/instance/moved_from", h.clearMovedFrom)
 
-	router.GET("/clients", listClients)
-	router.DELETE("/clients/:id", revokeClient)
-	router.POST("/synchronized", synchronized)
+	router.PUT("/avatar", h.UploadAvatar)
 
-	router.GET("/onboarded", onboarded)
-	router.GET("/context", context)
-	router.GET("/warnings", warnings)
+	router.GET("/flags", h.getFlags)
+
+	router.GET("/sessions", h.getSessions)
+	router.GET("/sessions/current", h.getCurrentSession)
+
+	router.GET("/clients", h.listClients)
+	router.DELETE("/clients/:id", h.revokeClient)
+	router.GET("/clients/limit-exceeded", h.limitExceeded)
+	router.POST("/synchronized", h.synchronized)
+
+	router.GET("/onboarded", h.onboarded)
+	router.GET("/install_flagship_app", h.installFlagshipApp)
+	router.GET("/context", h.context)
+	router.GET("/warnings", h.listWarnings)
 }

@@ -1,8 +1,12 @@
+// Package middlewares is used for the HTTP middlewares, ie functions that
+// takes an echo context to do stuff like checking permissions or caching
+// requests.
 package middlewares
 
 import (
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -20,7 +24,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/logger"
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 )
 
@@ -138,7 +142,11 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 	var audience string
 
 	err := crypto.ParseJWT(token, func(token *jwt.Token) (interface{}, error) {
-		audience = token.Claims.(*permission.BitwardenClaims).Claims.Audience
+		audiences := token.Claims.(*permission.BitwardenClaims).Claims.Audience
+		if len(audiences) != 1 {
+			return nil, permission.ErrInvalidAudience
+		}
+		audience = audiences[0]
 		return instance.PickKey(audience)
 	}, &fullClaims)
 
@@ -152,7 +160,6 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 
 	if err != nil {
 		logger.WithNamespace("permissions").Debugf("invalid token: %s", err)
-		c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Bearer error="invalid_token"`)
 		return nil, permission.ErrInvalidToken
 	}
 
@@ -160,14 +167,11 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 	if claims.Issuer != instance.Domain {
 		logger.WithNamespace("permissions").
 			Debugf("invalid token: bad domain %s != %s", claims.Issuer, instance.Domain)
-		c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Bearer error="invalid_token"`)
 		return nil, permission.ErrInvalidToken
 	}
 
 	if claims.Expired() {
 		logger.WithNamespace("permissions").Debugf("invalid token: expired")
-		c.Response().Header().Set(echo.HeaderWWWAuthenticate,
-			`Bearer error="invalid_token" error_description="The access token expired"`)
 		return nil, permission.ErrExpiredToken
 	}
 
@@ -183,7 +187,6 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 				logger.WithNamespace("permissions").
 					Debugf("invalid token: no session")
 			}
-			c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Bearer error="invalid_token"`)
 			return nil, permission.ErrInvalidToken
 		}
 	}
@@ -193,9 +196,13 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 	if claims.SStamp != "" {
 		settings, err := settings.Get(instance)
 		if err != nil || claims.SStamp != settings.SecurityStamp {
-			logger.WithNamespace("permissions").
-				Debugf("invalid token: bad security stamp %s != %s", claims.SStamp, settings.SecurityStamp)
-			c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Bearer error="invalid_token"`)
+			if err != nil {
+				logger.WithNamespace("permissions").
+					Debugf("could not get instance settings: %s", err)
+			} else {
+				logger.WithNamespace("permissions").
+					Debugf("invalid token: bad security stamp %s != %s", claims.SStamp, settings.SecurityStamp)
+			}
 			return nil, permission.ErrInvalidToken
 		}
 	}
@@ -203,28 +210,61 @@ func ExtractClaims(c echo.Context, instance *instance.Instance, token string) (*
 	return &claims, nil
 }
 
-// ParseJWT parses a JSON Web Token, and returns the associated permissions.
-func ParseJWT(c echo.Context, instance *instance.Instance, token string) (*permission.Permission, error) {
-	if shortCodeRegexp.MatchString(token) { // token is a shortcode
-		var err error
-		// XXX in theory, the shortcode is exactly 12 characters. But
-		// somethimes, when people shares a public link with this token, they
-		// can put a "." just after the link to finish their sentence, and this
-		// "." can be added to the token. So, it's better to accept a shortcode
-		// with a final ".", and clean it.
-		token = strings.TrimSuffix(token, ".")
-		token, err = permission.GetTokenFromShortcode(instance, token)
-		if err != nil {
-			return nil, err
-		}
+// HasCookieForPassword returns true if a cookie has been set for the
+// permission with a given ID if its password has been given by the user, and a
+// cookie has been put for that.
+func HasCookieForPassword(c echo.Context, inst *instance.Instance, permID string) bool {
+	cookieName := "pass" + permID
+	cookie, err := c.Cookie(cookieName)
+	if err != nil || cookie.Value == "" {
+		return false
 	}
 
-	claims, err := ExtractClaims(c, instance, token)
+	cfg := crypto.MACConfig{Name: cookieName, MaxLen: 256}
+	id, err := crypto.DecodeAuthMessage(cfg, inst.SessionSecret(), []byte(cookie.Value), nil)
+	if err != nil {
+		return false
+	}
+
+	return string(id) == permID
+}
+
+// TransformShortcodeToJWT takes a token. If it is a short code, it transforms
+// it to a JWT by using the associated permission. Else, it just returns the
+// token.
+func TransformShortcodeToJWT(inst *instance.Instance, token string) (string, error) {
+	if !shortCodeRegexp.MatchString(token) {
+		return token, nil
+	}
+
+	// XXX in theory, the shortcode is exactly 12 characters. But
+	// somethimes, when people shares a public link with this token, they
+	// can put a "." just after the link to finish their sentence, and this
+	// "." can be added to the token. So, it's better to accept a shortcode
+	// with a final ".", and clean it.
+	token = strings.TrimSuffix(token, ".")
+	return permission.GetTokenFromShortcode(inst, token)
+}
+
+// ParseJWT parses a JSON Web Token, and returns the associated permissions.
+func ParseJWT(c echo.Context, instance *instance.Instance, token string) (*permission.Permission, error) {
+	token, err := TransformShortcodeToJWT(instance, token)
 	if err != nil {
 		return nil, err
 	}
 
-	switch claims.Audience {
+	claims, err := ExtractClaims(c, instance, token)
+	if err != nil {
+		if errors.Is(err, permission.ErrExpiredToken) {
+			c.Response().Header().Set(echo.HeaderWWWAuthenticate,
+				`Bearer error="invalid_token" error_description="The access token expired"`)
+		} else {
+			c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Bearer error="invalid_token"`)
+		}
+		return nil, err
+	}
+
+	switch claims.AudienceString() {
 	case consts.AccessTokenAudience:
 		if err := instance.MovedError(); err != nil {
 			return nil, err
@@ -270,6 +310,11 @@ func ParseJWT(c echo.Context, instance *instance.Instance, token string) (*permi
 			return nil, err
 		}
 
+		// Check that the password has been given for password protected share by link
+		if pdoc.Password != nil && !HasCookieForPassword(c, instance, pdoc.ID()) {
+			return nil, permission.ErrInvalidToken
+		}
+
 		// A share token is only valid if the user has not been revoked
 		if pdoc.Type == permission.TypeSharePreview || pdoc.Type == permission.TypeShareInteract {
 			sharingID := strings.Split(pdoc.SourceID, "/")
@@ -302,8 +347,41 @@ func ParseJWT(c echo.Context, instance *instance.Instance, token string) (*permi
 		return pdoc, nil
 
 	default:
-		return nil, echo.NewHTTPError(http.StatusBadRequest, "Unrecognized token audience "+claims.Audience)
+		return nil, echo.NewHTTPError(http.StatusBadRequest,
+			fmt.Sprintf("Unrecognized token audience %v", claims.Audience))
 	}
+}
+
+// GetCLIPermission tries to extract a CLI permission from the echo context
+// without tampering with the response headers in case the token is invalid.
+func GetCLIPermission(c echo.Context) (*permission.Permission, bool) {
+	var err error
+
+	pdoc, ok := c.Get(contextPermissionDoc).(*permission.Permission)
+	if ok && pdoc != nil && pdoc.Type == permission.TypeCLI {
+		return pdoc, true
+	}
+
+	instance := GetInstance(c)
+
+	token := GetRequestToken(c)
+	if token == "" {
+		return nil, false
+	}
+
+	claims, err := ExtractClaims(c, instance, token)
+	if err != nil {
+		return nil, false
+	}
+
+	if claims.AudienceString() == consts.CLIAudience {
+		if pdoc, err := permission.GetForCLI(claims); err != nil {
+			c.Set(contextPermissionDoc, pdoc)
+			return pdoc, true
+		}
+	}
+
+	return nil, false
 }
 
 // GetPermission extracts the permission from the echo context and checks their validity

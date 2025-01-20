@@ -45,7 +45,7 @@ func (p *apiPassphraseParameters) Links() *jsonapi.LinksList {
 	return &jsonapi.LinksList{Self: "/settings/passphrase"}
 }
 
-func getPassphraseParameters(c echo.Context) error {
+func (h *HTTPHandler) getPassphraseParameters(c echo.Context) error {
 	if err := middlewares.AllowWholeType(c, permission.GET, consts.Settings); err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ type passphraseRegistrationParameters struct {
 	ClientSecret string `json:"client_secret"`
 }
 
-func registerPassphrase(c echo.Context) error {
+func (h *HTTPHandler) registerPassphrase(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	accept := c.Request().Header.Get(echo.HeaderAccept)
@@ -136,7 +136,7 @@ func registerPassphrase(c echo.Context) error {
 	return finishOnboarding(c, args.Redirection, acceptHTML)
 }
 
-func registerPassphraseFlagship(c echo.Context) error {
+func (h *HTTPHandler) registerPassphraseFlagship(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	var args passphraseRegistrationParameters
@@ -232,7 +232,7 @@ func registerPassphraseFlagship(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-func updatePassphrase(c echo.Context) error {
+func (h *HTTPHandler) updatePassphrase(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 	currentSession, hasSession := middlewares.GetSession(c)
 
@@ -266,18 +266,22 @@ func updatePassphrase(c echo.Context) error {
 		canForce := false
 
 		// CLI can force the passphrase
-		p, err := middlewares.GetPermission(c)
-		if err == nil && p.Type == permission.TypeCLI {
+		if _, ok := middlewares.GetCLIPermission(c); ok {
 			canForce = true
 		}
 
 		// On cozy with OIDC and empty vault, the password can be forced to
-		// allow the setup of Cozy Pass. Same for magic links.
-		if inst.HasForcedOIDC() || inst.MagicLink {
-			bitwarden, err := settings.Get(inst)
-			if err == nil && !bitwarden.ExtensionInstalled {
-				canForce = true
+		// allow the setup of Cozy Pass. Same for magic links. But only to
+		// set a password for the first time.
+		if inst.PasswordDefined == nil {
+			if inst.HasForcedOIDC() || inst.MagicLink {
+				bitwarden, err := settings.Get(inst)
+				if err == nil && !bitwarden.ExtensionInstalled {
+					canForce = true
+				}
 			}
+		} else if !*inst.PasswordDefined {
+			canForce = true
 		}
 
 		if !canForce {
@@ -307,7 +311,7 @@ func updatePassphrase(c echo.Context) error {
 
 	// Else, we keep going on the standard checks (2FA, current passphrase, ...)
 	if inst.HasAuthMode(instance.TwoFactorMail) && len(args.TwoFactorToken) == 0 {
-		if lifecycle.CheckPassphrase(inst, currentPassphrase) == nil {
+		if instance.CheckPassphrase(inst, currentPassphrase) == nil {
 			var twoFactorToken []byte
 			twoFactorToken, err = lifecycle.SendTwoFactorPasscode(inst)
 			if err != nil {
@@ -351,7 +355,7 @@ func updatePassphrase(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func checkPassphrase(c echo.Context) error {
+func (h *HTTPHandler) checkPassphrase(c echo.Context) error {
 	// Even if the current passphrase is needed for this request to work, we
 	// enforce a valid permission to avoid having an unauthorized enpoint that
 	// can be bruteforced.
@@ -368,14 +372,14 @@ func checkPassphrase(c echo.Context) error {
 		return jsonapi.BadRequest(err)
 	}
 
-	if lifecycle.CheckPassphrase(inst, []byte(args.Passphrase)) != nil {
+	if instance.CheckPassphrase(inst, []byte(args.Passphrase)) != nil {
 		return jsonapi.Forbidden(instance.ErrInvalidPassphrase)
 	}
 
 	return c.NoContent(http.StatusNoContent)
 }
 
-func getHint(c echo.Context) error {
+func (h *HTTPHandler) getHint(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	if err := middlewares.AllowWholeType(c, permission.GET, consts.Settings); err != nil {
@@ -394,7 +398,7 @@ func getHint(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func updateHint(c echo.Context) error {
+func (h *HTTPHandler) updateHint(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	if err := middlewares.AllowWholeType(c, permission.PUT, consts.Settings); err != nil {
@@ -419,6 +423,26 @@ func updateHint(c echo.Context) error {
 	setting.PassphraseHint = args.Hint
 	if err := setting.Save(inst); err != nil {
 		return err
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) createVault(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.BitwardenCiphers); err != nil {
+		return err
+	}
+
+	setting, err := settings.Get(inst)
+	if err != nil {
+		return err
+	}
+
+	if !setting.ExtensionInstalled {
+		if err := settings.MigrateAccountsToCiphers(inst); err != nil {
+			return jsonapi.InternalServerError(err)
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }

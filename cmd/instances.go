@@ -42,8 +42,6 @@ var flagTrace bool
 var flagPassphrase string
 var flagForce bool
 var flagJSON bool
-var flagForceRegistry bool
-var flagOnlyRegistry bool
 var flagSwiftLayout int
 var flagCouchCluster int
 var flagUUID string
@@ -54,6 +52,7 @@ var flagTOSSigned string
 var flagTOS string
 var flagTOSLatest string
 var flagContextName string
+var flagSponsorships []string
 var flagOnboardingFinished bool
 var flagTTL time.Duration
 var flagExpire time.Duration
@@ -138,7 +137,7 @@ It will also show the couch_cluster if it is not the default one.
 			fmt.Println(couchdb.EscapeCouchdbName(in.Attrs.Domain))
 		}
 		if in.Attrs.CouchCluster != 0 {
-			fmt.Printf("couch_cluster: %d\n", in.Attrs.CouchCluster)
+			fmt.Fprintf(os.Stdout, "couch_cluster: %d\n", in.Attrs.CouchCluster)
 		}
 		return nil
 	},
@@ -153,7 +152,7 @@ cozy-stack instances add allows to create an instance on the cozy for a
 given domain.
 
 If the COZY_DISABLE_INSTANCES_ADD_RM env variable is set, creating and
-destroying instances will be desactivated and the content of this variable will
+destroying instances will be disabled and the content of this variable will
 be used as the error message.
 `,
 	Example: "$ cozy-stack instances add --passphrase cozy --apps drive,photos,settings,home,store cozy.localhost:8080",
@@ -178,6 +177,7 @@ be used as the error message.
 		}
 
 		domain := args[0]
+		fmt.Fprintf(os.Stdout, "Creating instance for domain \"%s\": please wait...\n", domain)
 		ac := newAdminClient()
 		in, err := ac.CreateInstance(&client.InstanceOptions{
 			Domain:          domain,
@@ -189,6 +189,7 @@ be used as the error message.
 			TOSSigned:       flagTOSSigned,
 			Timezone:        flagTimezone,
 			ContextName:     flagContextName,
+			Sponsorships:    flagSponsorships,
 			Email:           flagEmail,
 			PublicName:      flagPublicName,
 			Settings:        flagSettings,
@@ -206,19 +207,25 @@ be used as the error message.
 			return err
 		}
 
-		fmt.Printf("Instance created with success for domain %s\n", in.Attrs.Domain)
+		fmt.Fprintf(os.Stdout, "Instance created with success for domain %s\n", in.Attrs.Domain)
 		myProtocol := "https"
 		if build.IsDevRelease() {
 			myProtocol = "http"
 		}
 		if in.Attrs.RegisterToken != nil {
-			fmt.Printf("Registration token: \"%s\"\n", hex.EncodeToString(in.Attrs.RegisterToken))
-			fmt.Printf("Define your password by visiting %s://%s/?registerToken=%s\n", myProtocol, in.Attrs.Domain, hex.EncodeToString(in.Attrs.RegisterToken))
+			fmt.Fprintf(os.Stdout, "Registration token: \"%s\"\n", hex.EncodeToString(in.Attrs.RegisterToken))
+			fmt.Fprintf(os.Stdout, "Define your password by visiting %s://%s/?registerToken=%s\n", myProtocol, in.Attrs.Domain, hex.EncodeToString(in.Attrs.RegisterToken))
 		}
 		if len(flagApps) == 0 {
 			return nil
 		}
-		apps, err := newClient(domain, consts.Apps).ListApps(consts.Apps)
+		c, err := ac.NewInstanceClient(domain, consts.Apps)
+		if err != nil {
+			errPrintfln("Could not generate access to domain %s", domain)
+			errPrintfln("%s", err)
+			os.Exit(1)
+		}
+		apps, err := c.ListApps(consts.Apps)
 		if err == nil && len(flagApps) != len(apps) {
 			for _, slug := range flagApps {
 				found := false
@@ -229,7 +236,7 @@ be used as the error message.
 					}
 				}
 				if !found {
-					fmt.Printf("/!\\ Application %s has not been installed\n", slug)
+					fmt.Fprintf(os.Stdout, "/!\\ Application %s has not been installed\n", slug)
 				}
 			}
 		}
@@ -271,6 +278,7 @@ settings for a specified domain.
 			TOSLatest:       flagTOSLatest,
 			Timezone:        flagTimezone,
 			ContextName:     flagContextName,
+			Sponsorships:    flagSponsorships,
 			Email:           flagEmail,
 			PublicName:      flagPublicName,
 			Settings:        flagSettings,
@@ -424,9 +432,9 @@ specific domain.
 			debug = false
 		}
 		if debug {
-			fmt.Printf("Debug is enabled on %s\n", domain)
+			fmt.Fprintf(os.Stdout, "Debug is enabled on %s\n", domain)
 		} else {
-			fmt.Printf("Debug is disabled on %s\n", domain)
+			fmt.Fprintf(os.Stdout, "Debug is disabled on %s\n", domain)
 		}
 		return err
 	},
@@ -443,9 +451,9 @@ var countInstanceCmd = &cobra.Command{
 			return err
 		}
 		if count == 1 {
-			fmt.Printf("%d instance\n", count)
+			fmt.Fprintf(os.Stdout, "%d instance\n", count)
 		} else {
-			fmt.Printf("%d instances\n", count)
+			fmt.Fprintf(os.Stdout, "%d instances\n", count)
 		}
 		return nil
 	},
@@ -635,14 +643,14 @@ and all its data.
 			return err
 		}
 
-		fmt.Printf("Instance for domain %s has been destroyed with success\n", domain)
+		fmt.Fprintf(os.Stdout, "Instance for domain %s has been destroyed with success\n", domain)
 		return nil
 	},
 }
 
 func confirmDomain(action, domain string) error {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf(`Are you sure you want to %s instance for domain %s?
+	fmt.Fprintf(os.Stdout, `Are you sure you want to %s instance for domain %s?
 All data associated with this domain will be permanently lost.
 Type again the domain to confirm: `, action, domain)
 
@@ -871,47 +879,6 @@ var findOauthClientCmd = &cobra.Command{
 	},
 }
 
-var updateCmd = &cobra.Command{
-	Use:   "update [slugs...]",
-	Short: "Start the updates for the specified domain instance.",
-	Long: `Start the updates for the specified domain instance. Use whether the --domain
-flag to specify the instance or the --all-domains flags to updates all domains.
-The slugs arguments can be used to select which applications should be
-updated.`,
-	Aliases: []string{"updates"},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		ac := newAdminClient()
-		if flagAllDomains {
-			logs := make(chan *client.JobLog)
-			go func() {
-				for log := range logs {
-					fmt.Printf("[%s][time:%s]", log.Level, log.Time.Format(time.RFC3339))
-					for k, v := range log.Data {
-						fmt.Printf("[%s:%s]", k, v)
-					}
-					fmt.Printf(" %s\n", log.Message)
-				}
-			}()
-			return ac.Updates(&client.UpdatesOptions{
-				Slugs:         args,
-				ForceRegistry: flagForceRegistry,
-				OnlyRegistry:  flagOnlyRegistry,
-				Logs:          logs,
-			})
-		}
-		if flagDomain == "" {
-			return errMissingDomain
-		}
-		return ac.Updates(&client.UpdatesOptions{
-			Domain:             flagDomain,
-			DomainsWithContext: flagContextName,
-			Slugs:              args,
-			ForceRegistry:      flagForceRegistry,
-			OnlyRegistry:       flagOnlyRegistry,
-		})
-	},
-}
-
 var exportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export an instance",
@@ -1061,7 +1028,7 @@ var setAuthModeCmd = &cobra.Command{
 			return err
 		}
 		if res.StatusCode == http.StatusNoContent {
-			fmt.Printf("Auth mode has been changed for %s\n", domain)
+			fmt.Fprintf(os.Stdout, "Auth mode has been changed for %s\n", domain)
 		} else {
 			resBody, err := io.ReadAll(res.Body)
 			if err != nil {
@@ -1105,7 +1072,6 @@ func init() {
 	instanceCmdGroup.AddCommand(oauthRefreshTokenInstanceCmd)
 	instanceCmdGroup.AddCommand(oauthClientInstanceCmd)
 	instanceCmdGroup.AddCommand(findOauthClientCmd)
-	instanceCmdGroup.AddCommand(updateCmd)
 	instanceCmdGroup.AddCommand(exportCmd)
 	instanceCmdGroup.AddCommand(importCmd)
 	instanceCmdGroup.AddCommand(showSwiftPrefixInstanceCmd)
@@ -1122,6 +1088,7 @@ func init() {
 	addInstanceCmd.Flags().StringVar(&flagTOS, "tos", "", "The TOS version signed")
 	addInstanceCmd.Flags().StringVar(&flagTimezone, "tz", "", "The timezone for the user")
 	addInstanceCmd.Flags().StringVar(&flagContextName, "context-name", "", "Context name of the instance")
+	addInstanceCmd.Flags().StringSliceVar(&flagSponsorships, "sponsorships", nil, "Sponsorships of the instance (comma separated list)")
 	addInstanceCmd.Flags().StringVar(&flagEmail, "email", "", "The email of the owner")
 	addInstanceCmd.Flags().StringVar(&flagPublicName, "public-name", "", "The public name of the owner")
 	addInstanceCmd.Flags().StringVar(&flagSettings, "settings", "", "A list of settings (eg context:foo,offer:premium)")
@@ -1142,6 +1109,7 @@ func init() {
 	modifyInstanceCmd.Flags().StringVar(&flagTOSLatest, "tos-latest", "", "Update the latest TOS version")
 	modifyInstanceCmd.Flags().StringVar(&flagTimezone, "tz", "", "New timezone")
 	modifyInstanceCmd.Flags().StringVar(&flagContextName, "context-name", "", "New context name")
+	modifyInstanceCmd.Flags().StringSliceVar(&flagSponsorships, "sponsorships", nil, "Sponsorships of the instance (comma separated list)")
 	modifyInstanceCmd.Flags().StringVar(&flagEmail, "email", "", "New email")
 	modifyInstanceCmd.Flags().StringVar(&flagPublicName, "public-name", "", "New public name")
 	modifyInstanceCmd.Flags().StringVar(&flagSettings, "settings", "", "New list of settings (eg offer:premium)")
@@ -1168,11 +1136,6 @@ func init() {
 	lsInstanceCmd.Flags().BoolVar(&flagJSON, "json", false, "Show each line as a json representation of the instance")
 	lsInstanceCmd.Flags().StringSliceVar(&flagListFields, "fields", nil, "Arguments shown for each line in the list")
 	lsInstanceCmd.Flags().BoolVar(&flagAvailableFields, "available-fields", false, "List available fields for --fields option")
-	updateCmd.Flags().BoolVar(&flagAllDomains, "all-domains", false, "Work on all domains iteratively")
-	updateCmd.Flags().StringVar(&flagDomain, "domain", "", "Specify the domain name of the instance")
-	updateCmd.Flags().StringVar(&flagContextName, "context-name", "", "Work only on the instances with the given context name")
-	updateCmd.Flags().BoolVar(&flagForceRegistry, "force-registry", false, "Force to update all applications sources from git to the registry")
-	updateCmd.Flags().BoolVar(&flagOnlyRegistry, "only-registry", false, "Only update applications installed from the registry")
 	exportCmd.Flags().StringVar(&flagDomain, "domain", "", "Specify the domain name of the instance")
 	exportCmd.Flags().StringVar(&flagPath, "path", "", "Specify the local path where to store the export archive")
 	importCmd.Flags().StringVar(&flagDomain, "domain", "", "Specify the domain name of the instance")

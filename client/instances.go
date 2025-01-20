@@ -35,12 +35,15 @@ type Instance struct {
 		UUID                 string    `json:"uuid,omitempty"`
 		OIDCID               string    `json:"oidc_id,omitempty"`
 		ContextName          string    `json:"context,omitempty"`
+		Sponsorships         []string  `json:"sponsorships,omitempty"`
+		FeatureSets          []string  `json:"feature_sets,omitempty"`
 		TOSSigned            string    `json:"tos,omitempty"`
 		TOSLatest            string    `json:"tos_latest,omitempty"`
 		AuthMode             int       `json:"auth_mode,omitempty"`
 		NoAutoUpdate         bool      `json:"no_auto_update,omitempty"`
 		Blocked              bool      `json:"blocked,omitempty"`
 		OnboardingFinished   bool      `json:"onboarding_finished"`
+		PasswordDefined      *bool     `json:"password_defined"`
 		MagicLink            bool      `json:"magic_link,omitempty"`
 		BytesDiskQuota       int64     `json:"disk_quota,string,omitempty"`
 		IndexViewsVersion    int       `json:"indexes_version"`
@@ -64,6 +67,7 @@ type InstanceOptions struct {
 	TOSLatest          string
 	Timezone           string
 	ContextName        string
+	Sponsorships       []string
 	Email              string
 	PublicName         string
 	Settings           string
@@ -103,16 +107,6 @@ type OAuthClientOptions struct {
 	OnboardingApp         string
 	OnboardingPermissions string
 	OnboardingState       string
-}
-
-// UpdatesOptions is a struct holding all the options to launch an update.
-type UpdatesOptions struct {
-	Domain             string
-	DomainsWithContext string
-	Slugs              []string
-	ForceRegistry      bool
-	OnlyRegistry       bool
-	Logs               chan *JobLog
 }
 
 type ExportOptions struct {
@@ -172,6 +166,9 @@ func (ac *AdminClient) CreateInstance(opts *InstanceOptions) (*Instance, error) 
 	}
 	if opts.DomainAliases != nil {
 		q.Add("DomainAliases", strings.Join(opts.DomainAliases, ","))
+	}
+	if opts.Sponsorships != nil {
+		q.Add("Sponsorships", strings.Join(opts.Sponsorships, ","))
 	}
 	if opts.MagicLink != nil && *opts.MagicLink {
 		q.Add("MagicLink", "true")
@@ -245,6 +242,9 @@ func (ac *AdminClient) ModifyInstance(opts *InstanceOptions) (*Instance, error) 
 	}
 	if opts.DomainAliases != nil {
 		q.Add("DomainAliases", strings.Join(opts.DomainAliases, ","))
+	}
+	if opts.Sponsorships != nil {
+		q.Add("Sponsorships", strings.Join(opts.Sponsorships, ","))
 	}
 	if opts.MagicLink != nil {
 		q.Add("MagicLink", strconv.FormatBool(*opts.MagicLink))
@@ -406,72 +406,6 @@ func (ac *AdminClient) RegisterOAuthClient(opts *OAuthClientOptions) (map[string
 	return client, nil
 }
 
-// Updates launch the updating process of the applications. When no Domain is
-// specified, the updates are launched for all the existing instances.
-func (ac *AdminClient) Updates(opts *UpdatesOptions) error {
-	q := url.Values{
-		"Domain":             {opts.Domain},
-		"DomainsWithContext": {opts.DomainsWithContext},
-		"Slugs":              {strings.Join(opts.Slugs, ",")},
-		"ForceRegistry":      {strconv.FormatBool(opts.ForceRegistry)},
-		"OnlyRegistry":       {strconv.FormatBool(opts.OnlyRegistry)},
-	}
-	channel, err := ac.RealtimeClient(RealtimeOptions{
-		DocTypes: []string{"io.cozy.jobs", "io.cozy.jobs.logs"},
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if opts.Logs != nil {
-			close(opts.Logs)
-		}
-		channel.Close()
-	}()
-	res, err := ac.Req(&request.Options{
-		Method:  "POST",
-		Path:    "/instances/updates",
-		Queries: q,
-	})
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	var job job.Job
-	if err = json.NewDecoder(res.Body).Decode(&job); err != nil {
-		return err
-	}
-	for evt := range channel.Channel() {
-		if evt.Event == "error" {
-			return fmt.Errorf("realtime: %s", evt.Payload.Title)
-		}
-		if evt.Payload.ID != job.ID() {
-			continue
-		}
-		switch evt.Payload.Type {
-		case "io.cozy.jobs":
-			if err = json.Unmarshal(evt.Payload.Doc, &job); err != nil {
-				return err
-			}
-			if job.State == "errored" {
-				return fmt.Errorf("error executing updates: %s", job.Error)
-			}
-			if job.State == "done" {
-				return nil
-			}
-		case "io.cozy.jobs.logs":
-			if opts.Logs != nil {
-				var log JobLog
-				if err = json.Unmarshal(evt.Payload.Doc, &log); err != nil {
-					return err
-				}
-				opts.Logs <- &log
-			}
-		}
-	}
-	return err
-}
-
 // Export launch the creation of a tarball to export data from an instance.
 func (ac *AdminClient) Export(opts *ExportOptions) error {
 	if !validDomain(opts.Domain) {
@@ -547,7 +481,7 @@ func (ac *AdminClient) Export(opts *ExportOptions) error {
 						filename = params["filename"]
 					}
 
-					fmt.Printf("Exporting archive %d/%d (%s)... ", i+1, partsCount, filename)
+					fmt.Fprintf(os.Stdout, "Exporting archive %d/%d (%s)... ", i+1, partsCount, filename)
 
 					filepath := path.Join(opts.LocalPath, filename)
 					f, err := os.OpenFile(filepath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)

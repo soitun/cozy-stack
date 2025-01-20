@@ -88,7 +88,7 @@ type AccountType struct {
 	Secret interface{} `json:"secret,omitempty"`
 
 	// For sending notifications via Firebase Cloud Messaging
-	AndroidAPIKey string `json:"android_api_key"`
+	FCMCredentials json.RawMessage `json:"fcm_credentials"`
 }
 
 // ID is used to implement the couchdb.Doc interface
@@ -188,6 +188,9 @@ func (at *AccountType) MakeOauthStartURL(i *instance.Instance, state string, par
 		vv.Add("code", params.Get("token"))
 		if id := params.Get("id_connector"); id != "" {
 			vv.Add("connector_ids", id)
+		}
+		if id := params.Get("connector_uuids"); id != "" {
+			vv.Add("connector_uuids", id)
 		}
 	case BIWebauth, BIWebauthAndSecret:
 		vv.Add("client_id", at.ClientID)

@@ -4,8 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
-	"sync"
+	"log"
 	"time"
 
 	build "github.com/cozy/cozy-stack/pkg/config"
@@ -13,36 +12,46 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	debugRedisAddChannel = "add:log-debug"
-	debugRedisRmvChannel = "rmv:log-debug"
-	debugRedisPrefix     = "debug:"
-)
+var debugLogger *logrus.Logger
 
-var opts Options
-var loggers = make(map[string]domainEntry)
-var loggersMu sync.RWMutex
+// Fields type, used to pass to [Logger.WithFields].
+type Fields map[string]interface{}
+
+// Logger allows to emits logs to the divers log systems.
+type Logger interface {
+	Debugf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
+	Warnf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+
+	Debug(msg string)
+	Info(msg string)
+	Warn(msg string)
+	Error(msg string)
+
+	// Generic field operations
+	WithField(fn string, fv interface{}) Logger
+	WithFields(fields Fields) Logger
+
+	// Business specific field operations.
+	WithTime(t time.Time) Logger
+	WithDomain(s string) Logger
+
+	Log(level Level, msg string)
+}
 
 // Options contains the configuration values of the logger system
 type Options struct {
-	Syslog bool
+	Hooks  []logrus.Hook
+	Output io.Writer
 	Level  string
 	Redis  redis.UniversalClient
 }
 
-type domainEntry struct {
-	log       *logrus.Logger
-	expiredAt *time.Time
-}
-
-func (entry *domainEntry) Expired() bool {
-	if entry.expiredAt == nil {
-		return false
-	}
-	return entry.expiredAt.Before(time.Now())
-}
-
 // Init initializes the logger module with the specified options.
+//
+// It also setup the global logger for go-redis. Thoses are at
+// Info level.
 func Init(opt Options) error {
 	level := opt.Level
 	if level == "" {
@@ -52,44 +61,22 @@ func Init(opt Options) error {
 	if err != nil {
 		return err
 	}
-	logrus.SetLevel(logLevel)
-	if opt.Syslog {
-		hook, err := syslogHook()
-		if err != nil {
-			return err
-		}
-		logrus.AddHook(hook)
-		logrus.SetOutput(io.Discard)
-	} else if build.IsDevRelease() && logLevel == logrus.DebugLevel {
-		formatter := logrus.StandardLogger().Formatter.(*logrus.TextFormatter)
-		formatter.TimestampFormat = time.RFC3339Nano
-	}
-	if cli := opt.Redis; cli != nil {
-		ctx := context.Background()
-		go subscribeLoggersDebug(ctx, cli)
-		go loadDebug(ctx, cli)
-	}
-	opts = opt
-	return nil
-}
 
-// AddDebugDomain adds the specified domain to the debug list.
-func AddDebugDomain(domain string, ttl time.Duration) error {
-	if cli := opts.Redis; cli != nil {
-		ctx := context.Background()
-		return publishDebug(ctx, cli, debugRedisAddChannel, domain, ttl)
-	}
-	addDebugDomain(domain, ttl)
-	return nil
-}
+	// Setup the global logger in case of someone call the global functions.
+	setupLogger(logrus.StandardLogger(), logLevel, opt)
 
-// RemoveDebugDomain removes the specified domain from the debug list.
-func RemoveDebugDomain(domain string) error {
-	if cli := opts.Redis; cli != nil {
-		ctx := context.Background()
-		return publishDebug(ctx, cli, debugRedisRmvChannel, domain, 0)
+	// Setup the debug logger used for the the domains in debug mode.
+	debugLogger = logrus.New()
+	setupLogger(debugLogger, logrus.DebugLevel, opt)
+
+	w := WithNamespace("go-redis").Writer()
+	l := log.New(w, "", 0)
+	redis.SetLogger(&contextPrint{l})
+
+	err = initDebugger(opt.Redis)
+	if err != nil {
+		return err
 	}
-	removeDebugDomain(domain)
 	return nil
 }
 
@@ -101,16 +88,6 @@ type Entry struct {
 
 // WithDomain returns a logger with the specified domain field.
 func WithDomain(domain string) *Entry {
-	loggersMu.RLock()
-	entry, ok := loggers[domain]
-	loggersMu.RUnlock()
-	if ok {
-		if !entry.Expired() {
-			e := entry.log.WithField("domain", domain)
-			return &Entry{e}
-		}
-		removeDebugDomain(domain)
-	}
 	e := logrus.WithField("domain", domain)
 	return &Entry{e}
 }
@@ -118,33 +95,41 @@ func WithDomain(domain string) *Entry {
 // WithNamespace returns a logger with the specified nspace field.
 func WithNamespace(nspace string) *Entry {
 	entry := logrus.WithField("nspace", nspace)
+
 	return &Entry{entry}
 }
 
 // WithNamespace adds a namespace (nspace field).
 func (e *Entry) WithNamespace(nspace string) *Entry {
-	return e.WithField("nspace", nspace)
+	entry := e.entry.WithField("nspace", nspace)
+	return &Entry{entry}
+}
+
+// WithDomain add a domain field.
+func (e *Entry) WithDomain(domain string) Logger {
+	entry := e.entry.WithField("domain", domain)
+	return &Entry{entry}
 }
 
 // WithField adds a single field to the Entry.
-func (e *Entry) WithField(key string, value interface{}) *Entry {
+func (e *Entry) WithField(key string, value interface{}) Logger {
 	entry := e.entry.WithField(key, value)
 	return &Entry{entry}
 }
 
 // WithFields adds a map of fields to the Entry.
-func (e *Entry) WithFields(fields logrus.Fields) *Entry {
-	entry := e.entry.WithFields(fields)
+func (e *Entry) WithFields(fields Fields) Logger {
+	entry := e.entry.WithFields(logrus.Fields(fields))
 	return &Entry{entry}
 }
 
 // WithTime overrides the Entry's time
-func (e *Entry) WithTime(t time.Time) *Entry {
+func (e *Entry) WithTime(t time.Time) Logger {
 	entry := e.entry.WithTime(t)
 	return &Entry{entry}
 }
 
-// Clone clones a logger entry.
+// AddHook adds a hook on a logger.
 func (e *Entry) AddHook(hook logrus.Hook) {
 	// We need to clone the underlying logger in order to add a specific hook
 	// only on this logger.
@@ -166,27 +151,35 @@ func (e *Entry) AddHook(hook logrus.Hook) {
 // with syslog.
 const maxLineWidth = 2000
 
-func (e *Entry) Log(level logrus.Level, msg string) {
+func (e *Entry) Log(level Level, msg string) {
 	if len(msg) > maxLineWidth {
 		msg = msg[:maxLineWidth-12] + " [TRUNCATED]"
 	}
-	e.entry.Log(level, msg)
+
+	if level == DebugLevel && e.IsDebug() {
+		// The domain is listed in the debug domains and the ttl is valid, use the debuglogger
+		// to debug
+		debugLogger.WithFields(e.entry.Data).Log(logrus.DebugLevel, msg)
+		return
+	}
+
+	e.entry.Log(getLogrusLevel(level), msg)
 }
 
 func (e *Entry) Debug(msg string) {
-	e.Log(logrus.DebugLevel, msg)
+	e.Log(DebugLevel, msg)
 }
 
 func (e *Entry) Info(msg string) {
-	e.Log(logrus.InfoLevel, msg)
+	e.Log(InfoLevel, msg)
 }
 
 func (e *Entry) Warn(msg string) {
-	e.Log(logrus.WarnLevel, msg)
+	e.Log(WarnLevel, msg)
 }
 
 func (e *Entry) Error(msg string) {
-	e.Log(logrus.ErrorLevel, msg)
+	e.Log(ErrorLevel, msg)
 }
 
 func (e *Entry) Debugf(format string, args ...interface{}) {
@@ -209,93 +202,61 @@ func (e *Entry) Writer() *io.PipeWriter {
 	return e.entry.Writer()
 }
 
-func addDebugDomain(domain string, ttl time.Duration) {
-	loggersMu.Lock()
-	defer loggersMu.Unlock()
-	_, ok := loggers[domain]
-	if ok {
-		return
-	}
-	logger := logrus.New()
-	logger.Level = logrus.DebugLevel
-	if opts.Syslog {
-		hook, err := syslogHook()
-		if err == nil {
-			logger.Hooks.Add(hook)
-			logger.Out = io.Discard
-		}
-	}
-	expiredAt := time.Now().Add(ttl)
-	loggers[domain] = domainEntry{logger, &expiredAt}
-}
-
-func removeDebugDomain(domain string) {
-	loggersMu.Lock()
-	defer loggersMu.Unlock()
-	delete(loggers, domain)
-}
-
-func subscribeLoggersDebug(ctx context.Context, cli redis.UniversalClient) {
-	sub := cli.Subscribe(ctx, debugRedisAddChannel, debugRedisRmvChannel)
-	for msg := range sub.Channel() {
-		parts := strings.Split(msg.Payload, "/")
-		domain := parts[0]
-		switch msg.Channel {
-		case debugRedisAddChannel:
-			var ttl time.Duration
-			if len(parts) >= 2 {
-				ttl, _ = time.ParseDuration(parts[1])
-			}
-			addDebugDomain(domain, ttl)
-		case debugRedisRmvChannel:
-			removeDebugDomain(domain)
-		}
-	}
-}
-
-func loadDebug(ctx context.Context, cli redis.UniversalClient) {
-	keys, err := cli.Keys(ctx, debugRedisPrefix+"*").Result()
-	if err != nil {
-		return
-	}
-	for _, key := range keys {
-		ttl, err := cli.TTL(ctx, key).Result()
-		if err != nil {
-			continue
-		}
-		domain := strings.TrimPrefix(key, debugRedisPrefix)
-		addDebugDomain(domain, ttl)
-	}
-}
-
-func publishDebug(ctx context.Context, cli redis.UniversalClient, channel, domain string, ttl time.Duration) error {
-	err := cli.Publish(ctx, channel, domain+"/"+ttl.String()).Err()
-	if err != nil {
-		return err
-	}
-	key := debugRedisPrefix + domain
-	if channel == debugRedisAddChannel {
-		err = cli.Set(ctx, key, 0, ttl).Err()
-	} else {
-		err = cli.Del(ctx, key).Err()
-	}
-	return err
-}
-
-// DebugExpiration returns the expiration date for the debug mode for the
-// instance logger of the given domain (or nil if the debug mode is not
-// activated).
-func DebugExpiration(domain string) *time.Time {
-	loggersMu.RLock()
-	entry, ok := loggers[domain]
-	loggersMu.RUnlock()
-	if !ok {
-		return nil
-	}
-	return entry.expiredAt
-}
-
 // IsDebug returns whether or not the debug mode is activated.
 func (e *Entry) IsDebug() bool {
-	return e.entry.Logger.Level == logrus.DebugLevel
+	if e.entry.Logger.Level == logrus.DebugLevel {
+		return true
+	}
+
+	domain, haveDomain := e.entry.Data["domain"].(string)
+	return haveDomain && debugger.ExpiresAt(domain) != nil
+}
+
+func setupLogger(logger *logrus.Logger, lvl logrus.Level, opt Options) {
+	logger.SetLevel(lvl)
+
+	if opt.Output != nil {
+		logger.SetOutput(opt.Output)
+	}
+
+	// We need to reset the hooks to avoid the accumulation of hooks for
+	// the global loggers in case of several calls to `Init`.
+	//
+	// This is the case for `logrus.StandardLogger()` and the tests for example.
+	logger.Hooks = logrus.LevelHooks{}
+
+	for _, hook := range opt.Hooks {
+		logger.AddHook(hook)
+	}
+
+	formatter := logger.Formatter.(*logrus.TextFormatter)
+	if build.IsDevRelease() && lvl == logrus.DebugLevel {
+		formatter.TimestampFormat = time.RFC3339Nano // Nanoseconds formatter
+	} else {
+		formatter.TimestampFormat = "2006-01-02T15:04:05.000Z07:00" // Milliseconds formatter
+	}
+}
+
+type contextPrint struct {
+	l *log.Logger
+}
+
+func (c contextPrint) Printf(ctx context.Context, format string, args ...interface{}) {
+	c.l.Printf(format, args...)
+}
+
+func getLogrusLevel(lvl Level) logrus.Level {
+	var logrusLevel logrus.Level
+	switch lvl {
+	case DebugLevel:
+		logrusLevel = logrus.DebugLevel
+	case InfoLevel:
+		logrusLevel = logrus.InfoLevel
+	case WarnLevel:
+		logrusLevel = logrus.WarnLevel
+	default:
+		logrusLevel = logrus.ErrorLevel
+	}
+
+	return logrusLevel
 }

@@ -1,4 +1,4 @@
-# 
+#
 # Translators:
 # Pierre Vandekerckhove <pierre4vdk@gmail.com>, 2019
 # Maxime M <maxime@cozycloud.cc>, 2019
@@ -9,7 +9,7 @@
 # Cyrille Perois <cyrille@cozycloud.cc>, 2023
 # Pierre Guillemot <pierrot@cozycloud.cc>, 2023
 # Bruno Michel, 2023
-# 
+#
 msgid ""
 msgstr ""
 "Last-Translator: Bruno Michel, 2023\n"
@@ -28,6 +28,9 @@ msgstr "Photos"
 
 msgid "Tree Notes"
 msgstr "Notes"
+
+msgid "Tree Shared Drives"
+msgstr "Drives"
 
 msgid "Tree Shared with me"
 msgstr "Partages reçus"
@@ -79,7 +82,7 @@ msgid "Login Password hide"
 msgstr "Cacher le mot de passe"
 
 msgid "Login Long Session"
-msgstr "Se souvenir de moi"
+msgstr "Se souvenir de moi et mes données sur cet appareil"
 
 msgid "Login Submit"
 msgstr "Se connecter"
@@ -304,7 +307,7 @@ msgstr "Partagé par"
 
 msgid "Authorize Sharing Description start"
 msgstr ""
-"%s et vous pouvez collaborer en modifiant le %s. Chaque modification sera "
+"%s et vous pouvez collaborer en modifiant %s. Chaque modification sera "
 "transmise automatiquement entre vos Cozy."
 
 msgid "Authorize Sharing Description end"
@@ -496,6 +499,15 @@ msgstr ""
 "Nous n'avons trouvé aucun Cozy à cette adresse. Il s'agit peut-être d'une "
 "erreur de frappe. Pour le savoir, vérifiez l'adresse de votre Cozy dans "
 "l'e-mail que nous vous avons envoyé au moment de sa création."
+
+msgid "Error InvalidToken Title"
+msgstr "Lien non valide"
+
+msgid "Error InvalidToken Message"
+msgstr "Le lien que vous avez suivi a expiré ou est erroné"
+
+msgid "Error InvalidToken Link"
+msgstr "Retourner à la page de configuration"
 
 msgid "Error Application not installed Title"
 msgstr "Application pas encore disponible"
@@ -697,6 +709,9 @@ msgstr "Groupes de récurrence bancaire"
 msgid "Permissions io.cozy.bills"
 msgstr "Factures"
 
+msgid "Permissions io.cozy.calendar"
+msgstr "Calendrier"
+
 msgid "Permissions io.cozy.coachco2.settings"
 msgstr "Paramètres de l'application"
 
@@ -735,6 +750,9 @@ msgstr "Tags"
 
 msgid "Permissions io.cozy.timeseries.geojson"
 msgstr "Déplacements"
+
+msgid "Permissions io.cozy.timeseries.grades"
+msgstr "Notes"
 
 msgid "Permissions io.cozy.settings"
 msgstr "Paramètres"
@@ -799,6 +817,18 @@ msgstr "Journaux de l'application"
 msgid "Permissions cc.cozycloud.errors"
 msgstr "Journaux de l'application"
 
+msgid "Permissions cc.cozycloud.announcements"
+msgstr "API pour récupérer les annonces"
+
+msgid "Permissions cc.cozycloud.announcements.uploads"
+msgstr "API pour récupérer les images des annonces"
+
+msgid "Permissions cc.cozycloud.announcements.dev"
+msgstr "API pour récupérer les annonces (développement)"
+
+msgid "Permissions cc.cozycloud.announcements.dev.uploads"
+msgstr "API pour récupérer les images des annonces (développement)"
+
 msgid "Mail Greeting"
 msgstr "Bonjour"
 
@@ -837,9 +867,24 @@ msgstr ""
 
 msgid "Mail Hint Outro"
 msgstr ""
-"En dernier recours la page mot de passe oublié vous permet de ré-initialiser"
-" votre mot de passeSi vous n’êtes pas à l’origine de cette demande, "
+"En dernier recours, la page mot de passe oublié vous permet de ré-initialiser"
+" votre mot de passe. Si vous n’êtes pas à l’origine de cette demande, "
 "contactez-nous en réponse à cet email."
+
+msgid "Mail Update Email Subject"
+msgstr "Mise a jour de l'email"
+
+msgid "Mail Update Email Intro 1"
+msgstr "Bonjour %s,"
+
+msgid "Mail Update Email Intro 2"
+msgstr "Vous avez demandé à changer l'adresse email de votre Cozy."
+
+msgid "Mail Update Email Button instruction"
+msgstr "Cliquez sur le bouton suivant pour valider votre changement d'adresse email."
+
+msgid "Mail Update Email Button text"
+msgstr "Je confirme ma nouvelle adresse"
 
 msgid "Mail Reset Passphrase Subject"
 msgstr "Ré-initialisation du mot de passe"
@@ -1038,9 +1083,6 @@ msgstr "Adresse IP :"
 msgid "Mail New Connection Browser"
 msgstr "Navigateur :"
 
-msgid "Mail New Connection OS"
-msgstr "Appareil :"
-
 msgid "Mail New Connection Change Passphrase instruction"
 msgstr ""
 "Vous confirmez en être l’initiateur ? Si oui, profitez de ce nouvel accès !\n"
@@ -1089,22 +1131,22 @@ msgid "Mail New Registration Revoke text"
 msgstr "Révoquer cet appareil"
 
 msgid "Mail Sharing Request Subject"
-msgstr "Accepter le partage de %s ?"
+msgstr "%s a partagé %s avec vous"
 
 msgid "Mail Sharing Request Intro"
 msgstr "Bonjour,"
 
 msgid "Mail Sharing Request Description"
-msgstr "%s (%s) vous invite à %s le %s **%s** sur son espace personnel, Cozy."
+msgstr "%s (%s) vous invite à %s %s **%s** depuis son espace personnel, Cozy."
 
 msgid "Mail Sharing Request Action Read"
-msgstr "consulter"
+msgstr "voir"
 
 msgid "Mail Sharing Request Action Write"
 msgstr "modifier"
 
 msgid "Mail Sharing Request Button text"
-msgstr "Accéder au %s"
+msgstr "Voir %s"
 
 msgid "Mail Sharing Member To Confirm Subject"
 msgstr "Vérification demandée pour finaliser le partage de vos mot de passe"
@@ -1141,25 +1183,40 @@ msgid "Mail Support Confirmation Signature"
 msgstr "Claude - Service Client chez Cozy Cloud"
 
 msgid "Notification Sharing Subject"
-msgstr "Vous avez un nouveau partage disponible dans votre Cozy"
+msgstr "%s a partagé %s avec vous"
 
 msgid "Notification Sharing Description"
-msgstr "%s vous invite à %s le %s %s"
+msgstr "%s vous invite à %s %s **%s**"
 
 msgid "Notification Sharing Type Organization"
 msgstr "dossier partagé de mots de passe"
 
+msgid "Notification Sharing Title Document"
+msgstr "un document"
+
+msgid "Notification Sharing Title Directory"
+msgstr "un répertoire"
+
+msgid "Notification Sharing Title File"
+msgstr "un fichier"
+
+msgid "Notification Sharing Title Note"
+msgstr "une note"
+
 msgid "Notification Sharing Type Document"
-msgstr "document"
+msgstr "le document"
 
 msgid "Notification Sharing Type Directory"
-msgstr "répertoire"
+msgstr "le répertoire"
 
 msgid "Notification Sharing Type File"
-msgstr "fichier"
+msgstr "le fichier"
+
+msgid "Notification Sharing Type Note"
+msgstr "la note"
 
 msgid "Notification Sharing Button text"
-msgstr "Voir le partage"
+msgstr "Voir %s"
 
 msgid "Sharing Connect to Cozy"
 msgstr "Renseignez l'adresse de votre Cozy"
@@ -1187,6 +1244,9 @@ msgstr "L'URL de votre Cozy n'est pas votre adresse email."
 msgid "Sharing Discovery Submit"
 msgstr "Synchroniser dans mon Cozy"
 
+msgid "Sharing Discovery Shortcut Submit"
+msgstr "Ajouter à mon Cozy"
+
 msgid "Sharing No Cozy"
 msgstr "Pas encore de Cozy ?"
 
@@ -1198,6 +1258,12 @@ msgstr "Découvrez Cozy maintenant !"
 
 msgid "Sharing Forgotten URL"
 msgstr "J'ai oublié mon adresse"
+
+msgid "Notifications Disk Quota Close Title"
+msgstr "Quota de stockage supérieur à 90%"
+
+msgid "Notifications Disk Quota Close Message"
+msgstr "Supprimez des fichiers ou changez d'offre pour obtenir plus d'espace de stockage."
 
 msgid "Notifications Disk Quota Subject"
 msgstr "Vous avez atteint 90% de votre espace de stockage."
@@ -1218,6 +1284,30 @@ msgstr ""
 
 msgid "Notifications Disk Quota free text"
 msgstr "Libérer de l'espace"
+
+msgid "Notifications OAuth Clients Subject"
+msgstr "Vous avez dépassé le nombre maximum d'appareils connectés inclus dans votre offre"
+
+msgid "Notifications OAuth Clients Title"
+msgstr "Information importante : nombre maximum d'appareils dépassé"
+
+msgid "Notifications OAuth Clients Greeting"
+msgstr "Bonjour,"
+
+msgid "Notifications OAuth Clients Reason Device"
+msgstr "**Vous avez dépassé le nombre d'appareils autorisés** en connectant **%s** à votre Cozy."
+
+msgid "Notifications OAuth Clients Reason Limit"
+msgstr "Votre offre vous permet de connecter jusqu'à **%.0f appareils** simultanément."
+
+msgid "Notifications OAuth Clients Increase Limit"
+msgstr "Pour augmenter cette limite, ou simplement nous soutenir, vous pouvez modifier l'offre de votre Cozy."
+
+msgid "Notifications OAuth Clients Offers Text"
+msgstr "Voir les offres"
+
+msgid "Notifications OAuth Clients Devices Text"
+msgstr "Gérer mes appareils"
 
 msgid "Terms of services have been updated"
 msgstr ""
@@ -1265,3 +1355,94 @@ msgstr ""
 
 msgid "File copy Suffix"
 msgstr "copie"
+
+msgid "Install New App Title"
+msgstr "Installez la nouvelle app Cozy !"
+
+msgid "Install App Unavailable"
+msgstr "Cette version de %s n'est désormais plus prise en charge."
+
+msgid "Install New Iphone App Description"
+msgstr "Merci d'installer la nouvelle application Cozy depuis l'App Store pour continuer à profiter de toutes ses fonctionnalités."
+
+msgid "Install New Android App Description"
+msgstr "Merci d'installer la nouvelle application Cozy depuis le Play Store pour continuer à profiter de toutes ses fonctionnalités."
+
+msgid "Install New Generic App Description"
+msgstr "Merci d'installer la nouvelle application Cozy depuis votre store pour continuer à profiter de toutes ses fonctionnalités."
+
+msgid "Install New App Store Btn"
+msgstr "Installer"
+
+msgid "Too Many OAuth Clients Title"
+msgstr "%s/%s appareils connectés"
+
+msgid "Too Many OAuth Clients Intro"
+msgstr "Votre offre actuelle vous permet de connecter simultanément %s appareils"
+
+msgid "Too Many OAuth Clients More Text"
+msgstr "En savoir plus"
+
+msgid "Too Many OAuth Clients More Link"
+msgstr "https://support.cozy.io/nombre-maximum-dappareils-connectes-autorises/"
+
+msgid "Too Many OAuth Clients Available Actions"
+msgstr "Déconnectez un appareil ou modifiez l'offre de votre Cozy pour accéder à votre Cozy depuis cet appareil."
+
+msgid "Too Many OAuth Clients Offers Btn"
+msgstr "Voir les offres"
+
+msgid "Too Many OAuth Clients Settings Btn"
+msgstr "Gérer les appareils connectés"
+
+msgid "Too Many OAuth Clients Refresh Btn"
+msgstr "Actualiser"
+
+msgid "Asset not found"
+msgstr "Élément non trouvé"
+
+msgid "Install flagship app Title"
+msgstr "Installer l'application pour terminer"
+
+msgid "Install flagship app Description"
+msgstr "Votre Cozy a bien été créé, installez l'application pour en profiter dès maintenant !"
+
+msgid "Install flagship app Install"
+msgstr "Installer l'app Cozy"
+
+msgid "Install flagship app Skip"
+msgstr "Continuer dans mon navigateur"
+
+msgid "Share by link Password Title"
+msgstr "Saisissez le mot de passe pour accéder aux données partagées avec vous"
+
+msgid "Share by link Password Field"
+msgstr "Mot de passe"
+
+msgid "Share by link Password Submit"
+msgstr "Continuer"
+
+msgid "Share by link Password Invalid"
+msgstr "Mot de passe incorrect"
+
+msgid "Onboarding Resend activation mail"
+msgstr "Envoyer à nouveau l'email de finalisation d'inscription"
+
+msgid "Onboarding Resend activation Title"
+msgstr "Consultez vos e-mails !"
+
+msgid "Onboarding Resend activation Body"
+msgstr ""
+"Nous vous avons envoyé par email un lien d'activation."
+
+msgid "Onboarding Resend activation Detail"
+msgstr ""
+"Nous préférons vous prévenir : cet e-mail peut s'avérer un brin joueur et se"
+" faufiler dans les dossiers Spam, Notifications ou Réseaux Sociaux. "
+"N'hésitez donc pas à jeter un œil à tous vos dossiers pour le retrouver. "
+
+msgid "Push Sharing Shortcut Title"
+msgstr "Un nouveau partage est disponible dans votre Cozy"
+
+msgid "Push Sharing Shortcut Message"
+msgstr "%s vous a partagé %s."

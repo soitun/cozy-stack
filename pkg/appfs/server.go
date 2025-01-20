@@ -16,11 +16,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	web_utils "github.com/cozy/cozy-stack/pkg/utils"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/ncw/swift/v2"
 	"github.com/spf13/afero"
@@ -99,9 +101,24 @@ func (g gzipReadCloser) Close() error {
 	return nil
 }
 
+type cacheEntry struct {
+	content []byte
+	headers swift.Headers
+}
+
+var cache *lru.Cache[string, cacheEntry]
+var initCacheOnce sync.Once
+
 // NewSwiftFileServer returns provides the apps.FileServer implementation
 // using the swift backend as file server.
 func NewSwiftFileServer(conn *swift.Connection, appsType consts.AppType) FileServer {
+	initCacheOnce.Do(func() {
+		c, err := lru.New[string, cacheEntry](1024)
+		if err != nil {
+			panic(err)
+		}
+		cache = c
+	})
 	return &swiftServer{
 		c:         conn,
 		container: containerName(appsType),
@@ -109,9 +126,27 @@ func NewSwiftFileServer(conn *swift.Connection, appsType consts.AppType) FileSer
 	}
 }
 
+func (s *swiftServer) openWithCache(objName string) (io.ReadCloser, swift.Headers, error) {
+	entry, ok := cache.Get(objName)
+	if !ok {
+		f, h, err := s.c.ObjectOpen(s.ctx, s.container, objName, false, nil)
+		if err != nil {
+			return f, h, err
+		}
+		entry.headers = h
+		entry.content, err = io.ReadAll(f)
+		if err != nil {
+			return nil, h, err
+		}
+		cache.Add(objName, entry)
+	}
+	f := io.NopCloser(bytes.NewReader(entry.content))
+	return f, entry.headers, nil
+}
+
 func (s *swiftServer) Open(slug, version, shasum, file string) (io.ReadCloser, error) {
 	objName := s.makeObjectName(slug, version, shasum, file)
-	f, h, err := s.c.ObjectOpen(s.ctx, s.container, objName, false, nil)
+	f, h, err := s.openWithCache(objName)
 	if err != nil {
 		return nil, wrapSwiftErr(err)
 	}
@@ -127,7 +162,7 @@ func (s *swiftServer) Open(slug, version, shasum, file string) (io.ReadCloser, e
 
 func (s *swiftServer) ServeFileContent(w http.ResponseWriter, req *http.Request, slug, version, shasum, file string) error {
 	objName := s.makeObjectName(slug, version, shasum, file)
-	f, h, err := s.c.ObjectOpen(s.ctx, s.container, objName, false, nil)
+	f, h, err := s.openWithCache(objName)
 	if err != nil {
 		return wrapSwiftErr(err)
 	}
@@ -178,8 +213,8 @@ func (s *swiftServer) ServeFileContent(w http.ResponseWriter, req *http.Request,
 	}
 
 	size, _ := strconv.ParseInt(contentLength, 10, 64)
-	web_utils.ServeContent(w, req, contentType, size, r)
-	return nil
+
+	return serveContent(w, req, contentType, size, r)
 }
 
 func (s *swiftServer) ServeCodeTarball(w http.ResponseWriter, req *http.Request, slug, version, shasum string) error {
@@ -195,11 +230,15 @@ func (s *swiftServer) ServeCodeTarball(w http.ResponseWriter, req *http.Request,
 		contentLength := h["Content-Length"]
 		contentType := h["Content-Type"]
 		size, _ := strconv.ParseInt(contentLength, 10, 64)
-		web_utils.ServeContent(w, req, contentType, size, f)
-		return nil
+
+		return serveContent(w, req, contentType, size, f)
 	}
 
 	buf, err := prepareTarball(s, slug, version, shasum)
+	if err != nil {
+		return err
+	}
+	content, err := io.ReadAll(buf)
 	if err != nil {
 		return err
 	}
@@ -207,12 +246,11 @@ func (s *swiftServer) ServeCodeTarball(w http.ResponseWriter, req *http.Request,
 
 	file, err := s.c.ObjectCreate(s.ctx, s.container, objName, true, "", contentType, nil)
 	if err == nil {
-		_, _ = io.Copy(file, buf)
+		_, _ = io.Copy(file, bytes.NewReader(content))
 		_ = file.Close()
 	}
 
-	web_utils.ServeContent(w, req, contentType, int64(buf.Len()), buf)
-	return nil
+	return serveContent(w, req, contentType, int64(len(content)), bytes.NewReader(content))
 }
 
 func (s *swiftServer) makeObjectName(slug, version, shasum, file string) string {
@@ -226,6 +264,7 @@ func (s *swiftServer) makeObjectName(slug, version, shasum, file string) string 
 func (s *swiftServer) FilesList(slug, version, shasum string) ([]string, error) {
 	prefix := s.makeObjectName(slug, version, shasum, "") + "/"
 	names, err := s.c.ObjectNamesAll(s.ctx, s.container, &swift.ObjectsOpts{
+		Limit:  10_000,
 		Prefix: prefix,
 	})
 	if err != nil {
@@ -378,8 +417,7 @@ func (s *aferoServer) serveFileContent(w http.ResponseWriter, req *http.Request,
 	}
 
 	contentType := mime.TypeByExtension(path.Ext(filepath))
-	web_utils.ServeContent(w, req, contentType, size, content)
-	return nil
+	return serveContent(w, req, contentType, size, content)
 }
 
 func (s *aferoServer) ServeCodeTarball(w http.ResponseWriter, req *http.Request, slug, version, shasum string) error {
@@ -389,8 +427,8 @@ func (s *aferoServer) ServeCodeTarball(w http.ResponseWriter, req *http.Request,
 	}
 
 	contentType := mime.TypeByExtension(".gz")
-	web_utils.ServeContent(w, req, contentType, int64(buf.Len()), buf)
-	return nil
+
+	return serveContent(w, req, contentType, int64(buf.Len()), buf)
 }
 
 func (s *aferoServer) FilesList(slug, version, shasum string) ([]string, error) {
@@ -491,4 +529,25 @@ func prepareTarball(s FileServer, slug, version, shasum string) (*bytes.Buffer, 
 		return nil, err
 	}
 	return buf, nil
+}
+
+// serveContent replies to the request using the content in the provided
+// reader. The Content-Length and Content-Type headers are added with the
+// provided values.
+func serveContent(w http.ResponseWriter, r *http.Request, contentType string, size int64, content io.Reader) error {
+	var err error
+
+	h := w.Header()
+	if size > 0 {
+		h.Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	}
+	w.WriteHeader(http.StatusOK)
+	if r.Method != "HEAD" {
+		_, err = io.Copy(w, content)
+	}
+
+	return err
 }

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/config/config"
@@ -40,7 +41,7 @@ func TestFiles(t *testing.T) {
 	var token string
 	var fileID string
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	require.NoError(t, loadLocale(), "Could not load default locale translations")
 
 	testutils.NeedCouchdb(t)
@@ -134,7 +135,7 @@ func TestFiles(t *testing.T) {
 		}).
 			NotNull()
 
-			// Check if we can fine the trashed "/foo/qux"
+		// Check if we can find the trashed "/foo/qux"
 		results.Find(func(_ int, value *httpexpect.Value) bool {
 			doc := value.Object().Value("doc").Object()
 			doc.ValueEqual("type", "directory")
@@ -199,7 +200,7 @@ func TestFiles(t *testing.T) {
 			return true
 		})
 
-		// Check if we can fine a trashed file
+		// Check if we can find a trashed file
 		results.NotFind(func(_ int, value *httpexpect.Value) bool {
 			doc := value.Object().Value("doc").Object()
 			doc.Value("path").String().HasPrefix("/.cozy_trash")
@@ -361,6 +362,74 @@ func TestFiles(t *testing.T) {
 			WithQuery("Type", "directory").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(422)
+	})
+
+	t.Run("CreateDirWithMetadata", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		obj := e.POST("/files/upload/metadata").
+			WithHeader("Content-Type", "application/json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(`{
+        "data": {
+            "type": "io.cozy.files.metadata",
+            "attributes": {
+                "device-id": "123456789"
+            }
+        }
+      }`)).
+			Expect().Status(201).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		data := obj.Value("data").Object()
+		data.ValueEqual("type", consts.FilesMetadata)
+		attrs := data.Value("attributes").Object()
+		attrs.ValueEqual("device-id", "123456789")
+		secret := data.Value("id").String().NotEmpty().Raw()
+
+		obj = e.POST("/files/").
+			WithQuery("Name", "dir-with-metadata").
+			WithQuery("Type", "directory").
+			WithQuery("MetadataID", secret).
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(201).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		dirID := obj.Path("$.data.id").String().NotEmpty().Raw()
+		meta := obj.Path("$.data.attributes.metadata").Object()
+		meta.ValueEqual("device-id", "123456789")
+
+		// Check that the metadata are still here after an update
+		obj = e.PATCH("/files/"+dirID).
+			WithQuery("Path", "/dir-with-metadata").
+			WithHeader("Content-Type", "application/json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(`{
+        "data": {
+          "type": "file",
+          "id": "` + dirID + `",
+          "attributes": {
+            "name": "new-name-for-dir-with-metadata"
+          }
+        }
+      }`)).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		meta = obj.Path("$.data.attributes.metadata").Object()
+		meta.ValueEqual("device-id", "123456789")
+
+		obj = e.GET("/files/"+dirID).
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		meta = obj.Path("$.data.attributes.metadata").Object()
+		meta.ValueEqual("device-id", "123456789")
 	})
 
 	t.Run("CreateDirConcurrently", func(t *testing.T) {
@@ -525,6 +594,30 @@ func TestFiles(t *testing.T) {
 		buf, err := readFile(storage, "/goodhash")
 		assert.NoError(t, err)
 		assert.Equal(t, "foo", string(buf))
+	})
+
+	t.Run("UploadExceedingQuota", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		lifecycle.Patch(testInstance, &lifecycle.Options{DiskQuota: 3})
+
+		e.POST("/files/").
+			WithQuery("Type", "file").
+			WithQuery("Name", "too-large").
+			WithQuery("Size", 3).
+			WithHeader("Content-Type", "text/plain").
+			WithHeader("Authorization", "Bearer "+token).
+			WithTransformer(func(r *http.Request) { r.ContentLength = -1 }).
+			WithBytes([]byte("baz")).
+			Expect().
+			Status(413).
+			Body().Contains(vfs.ErrFileTooBig.Error())
+
+		storage := testInstance.VFS()
+		_, err := readFile(storage, "/too-large")
+		assert.Error(t, err)
+
+		lifecycle.Patch(testInstance, &lifecycle.Options{DiskQuota: -1})
 	})
 
 	t.Run("UploadImage", func(t *testing.T) {
@@ -932,7 +1025,10 @@ func TestFiles(t *testing.T) {
             "tags": ["bar", "bar", "baz"],
             "name": "moved",
             "dir_id": "` + dirID + `",
-            "executable": true
+            "executable": true,
+            "cozyMetadata": {
+              "favorite": true
+            }
           }
         }
       }`)).
@@ -948,6 +1044,7 @@ func TestFiles(t *testing.T) {
 		attrs.ValueEqual("md5sum", "rL0Y20zC+Fzt72VPzMSk2A==")
 		attrs.ValueEqual("executable", true)
 		attrs.ValueEqual("size", "3")
+		attrs.Value("cozyMetadata").Object().ValueEqual("favorite", true)
 	})
 
 	t.Run("ModifyMetadataFileMove", func(t *testing.T) {
@@ -1299,8 +1396,9 @@ func TestFiles(t *testing.T) {
 			Object()
 
 		data1 := obj.Value("data").Object()
-		attrs1 := data1.Value("attributes").Object()
 		file1ID := data1.Value("id").String().NotEmpty().Raw()
+		attrs1 := data1.Value("attributes").Object()
+		uploadedAt1 := attrs1.Path("$.cozyMetadata.uploadedAt").String().NotEmpty().Raw()
 
 		buf, err := readFile(storage, "/willbemodified")
 		assert.NoError(t, err)
@@ -1342,6 +1440,7 @@ func TestFiles(t *testing.T) {
 		attrs.ValueEqual("class", "audio")
 		attrs.ValueEqual("mime", "audio/mp3")
 		attrs.ValueEqual("executable", false)
+		attrs.Path("$.cozyMetadata.uploadedAt").NotEqual(uploadedAt1)
 
 		buf, err = readFile(storage, "/willbemodified")
 		assert.NoError(t, err)
@@ -3206,6 +3305,33 @@ func TestFiles(t *testing.T) {
 		})
 	})
 
+	t.Run("GetAllDocs", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		obj := e.POST("/files/_all_docs").
+			WithHeader("Content-Type", "application/json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(fmt.Sprintf(`{
+				"keys": ["io.cozy.files.root-dir", "%s"]
+      }`, fileID))).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		data := obj.Value("data").Array()
+		data.Length().IsEqual(2)
+
+		elem := data.Value(0).Object()
+		attrs := elem.Value("attributes").Object()
+		attrs.HasValue("path", "/")
+
+		elem = data.Value(1).Object()
+		attrs = elem.Value("attributes").Object()
+		attrs.Value("path").String().NotEmpty()
+		links := elem.Value("links").Object()
+		links.Value("tiny").String().NotEmpty()
+	})
+
 	t.Run("Find", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
@@ -3336,13 +3462,39 @@ func TestFiles(t *testing.T) {
 		attrs.Value("type").String().NotEmpty()
 		attrs.Value("size").String().AsNumber(10)
 		attrs.ValueEqual("trashed", false)
-		attrs.ValueEqual("encrypted", false)
+		attrs.NotContainsKey("encrypted")
 		attrs.NotContainsKey("created_at")
 		attrs.NotContainsKey("updated_at")
 		attrs.NotContainsKey("tags")
 		attrs.NotContainsKey("executable")
 		attrs.NotContainsKey("dir_id")
 		attrs.NotContainsKey("path")
+
+		obj = e.POST("/files/_find").
+			WithHeader("Content-Type", "application/json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(`{
+				"selector": {
+					"type": "file"
+				},
+				"fields": ["type", "path"],
+				"limit": 1
+      }`)).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		data = obj.Value("data").Array()
+		data.Length().Equal(1)
+
+		attrs = data.First().Object().Value("attributes").Object()
+		attrs.Value("path").String().NotEmpty()
+		attrs.Value("type").String().NotEmpty()
+		attrs.NotContainsKey("name")
+		attrs.NotContainsKey("created_at")
+		attrs.NotContainsKey("updated_at")
+		attrs.NotContainsKey("tags")
+		attrs.NotContainsKey("executable")
 
 		// Create dir "/aDirectoryWithReferencedBy"
 		dirID := e.POST("/files/").
@@ -3491,7 +3643,7 @@ func TestFiles(t *testing.T) {
 	})
 
 	t.Run("DeprecatePreviewAndIcon", func(t *testing.T) {
-		testutils.TODO(t, "2023-12-01", "Remove the deprecated preview and icon for PDF files")
+		testutils.TODO(t, "2025-05-01", "Remove the deprecated preview and icon for PDF files")
 	})
 }
 

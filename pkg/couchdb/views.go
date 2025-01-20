@@ -156,13 +156,16 @@ func UpdateIndexesAndViews(db prefixer.Prefixer, indexes []*mango.Index, views [
 		}
 		exists := false
 		for _, old := range ddocsByDoctype[index.Doctype] {
+			if old == nil {
+				continue
+			}
 			name := "undefined"
 			for key := range old.Views {
 				name = key
 			}
 			mapFields := map[string]interface{}{}
 			defFields := []interface{}{}
-			for _, field := range index.Request.Index {
+			for _, field := range index.Request.Index.Fields {
 				mapFields[field] = "asc"
 				defFields = append(defFields, field)
 			}
@@ -171,7 +174,7 @@ func UpdateIndexesAndViews(db prefixer.Prefixer, indexes []*mango.Index, views [
 				Doctype: index.Doctype,
 				Map: map[string]interface{}{
 					"fields":                  mapFields,
-					"partial_filter_selector": map[string]interface{}{},
+					"partial_filter_selector": index.Request.Index.PartialFilter,
 				},
 				Reduce: "_count",
 				Options: map[string]interface{}{

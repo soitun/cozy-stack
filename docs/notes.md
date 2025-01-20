@@ -33,6 +33,7 @@ It creates a note: it creates a files with the right metadata for collaborative 
 | title     | The title of the note, that will also be used for the filename            |
 | dir_id    | The identifier of the directory where the file will be created (optional) |
 | schema    | The schema for prosemirror (with OrderedMap transformed as arrays)        |
+| content   | The initial content of the note (optional)                                |
 
 **Note:** if the `dir_id` is not given, the file will be created in a `Notes`
 directory (and this directory will have a referenced_by on the notes apps to
@@ -434,6 +435,56 @@ Content-Type: application/vnd.api+json
       }
     }
   }
+}
+```
+
+### GET /notes/:id/text
+
+It returns the content of the note as text with no formatting.
+
+#### Request
+
+```http
+GET /notes/bf0dbdb0-e1ed-0137-8548-543d7eb8149c/text HTTP/1.1
+Host: alice.example.net
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=UTF-8
+```
+
+```
+This is the content of the note.
+```
+
+
+### GET /notes/texts
+
+It returns the content of several notes as text with no formatting. The
+identifiers of the notes must be given in the query-string parameter `ids`, as
+a comma-separated list.
+
+#### Request
+
+```http
+GET /notes/texts?ids=bf0dbdb0-e1ed-0137-8548-543d7eb8149c,6bc77a60-c8fe-013c-20a9-18c04daba326 HTTP/1.1
+Host: alice.example.net
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{
+  "bf0dbdb0-e1ed-0137-8548-543d7eb8149c": "This is the content of the note.",
+  "6bc77a60-c8fe-013c-20a9-18c04daba326": "This is the text of another note."
 }
 ```
 
@@ -1214,6 +1265,71 @@ Content-Type: application/vnd.api+json
     },
     "links": {
       "self": "/notes/f48d9370-e1ec-0137-8547-543d7eb8149c/images/e57d2ec0-d281-0139-2bed-543d7eb8149c/543d7eb8149c128b"
+    }
+  }
+}
+```
+
+### POST /notes/:id/:image-id/copy
+
+Copy an existing image to another note. It is similar to `POST
+/notes/:id/images` as creating an image, but can be useful to avoid downloading
+and then reuploading the image content when the user makes a copy/paste.
+
+The `:id` and `:image-id` path parameters identify the source image. The
+destination note will be specified in the query-string, as `To`.
+
+#### Query-String
+
+| Parameter  | Description                                       |
+| ---------- | ------------------------------------------------- |
+| To         | the ID of the note where the image will be copied |
+
+#### Request
+
+```http
+POST /notes/f48d9370-e1ec-0137-8547-543d7eb8149c/e57d2ec0-d281-0139-2bed-543d7eb8149c/copy?To=76ddf590-905e-013c-5ff2-18c04daba326 HTTP/1.1
+Accept: application/vnd.api+json
+Host: cozy.example.com
+```
+
+#### Response
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/vnd.api+json
+```
+
+```json
+{
+  "data": {
+    "type": "io.cozy.notes.images",
+    "id": "76ddf590-905e-013c-5ff2-18c04daba326/8d146530-905e-013c-5ff3-98b45e10905e",
+    "meta": {
+      "rev": "1-18c04dab"
+    },
+    "attributes": {
+      "name": "diagram.jpg",
+      "mime": "image/jpeg",
+      "width": 1000,
+      "height": 1000,
+      "willBeResized": true,
+      "cozyMetadata": {
+        "doctypeVersion": "1",
+        "metadataVersion": 1,
+        "createdAt": "2024-01-08T15:18:00Z",
+        "createdByApp": "notes",
+        "createdOn": "https://cozy.example.com/",
+        "updatedAt": "2024-01-08T15:18:00Z",
+        "uploadedAt": "2024-01-08T15:18:00Z",
+        "uploadedOn": "https://cozy.example.com/",
+        "uploadedBy": {
+          "slug": "notes"
+        }
+      }
+    },
+    "links": {
+      "self": "/notes/76ddf590-905e-013c-5ff2-18c04daba326/images/8d146530-905e-013c-5ff3-98b45e10905e/d251f620d98e1740"
     }
   }
 }

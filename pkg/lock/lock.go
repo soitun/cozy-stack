@@ -8,7 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// LockGetter return a lock on a resource matching the given `name`.
+// Getter returns a lock on a resource matching the given `name`.
 type Getter interface {
 	// ReadWrite returns the read/write lock for the given name.
 	// By convention, the name should be prefixed by the instance domain on which
@@ -41,18 +41,25 @@ type ErrorRWLocker interface {
 	RUnlock()
 }
 
+type longOperationLocker interface {
+	ErrorLocker
+	Extend()
+}
+
 type longOperation struct {
-	lock ErrorLocker
-	mu   sync.Mutex
-	tick *time.Ticker
+	lock    longOperationLocker
+	mu      sync.Mutex
+	tick    *time.Ticker
+	timeout time.Duration
 }
 
 func (l *longOperation) Lock() error {
 	if err := l.lock.Lock(); err != nil {
 		return err
 	}
-	l.tick = time.NewTicker(LockTimeout / 3)
+	l.tick = time.NewTicker(l.timeout / 3)
 	go func() {
+		defer l.mu.Unlock()
 		for {
 			l.mu.Lock()
 			if l.tick == nil {
@@ -65,7 +72,7 @@ func (l *longOperation) Lock() error {
 			if l.tick == nil {
 				return
 			}
-			_ = l.lock.Lock()
+			l.lock.Extend()
 			l.mu.Unlock()
 		}
 	}()

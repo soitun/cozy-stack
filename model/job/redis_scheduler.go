@@ -59,6 +59,7 @@ type redisScheduler struct {
 	client  redis.UniversalClient
 	ctx     context.Context
 	thumb   *ThumbnailTrigger
+	share   *ShareGroupTrigger
 	closed  chan struct{}
 	stopped chan struct{}
 	log     *logger.Entry
@@ -99,6 +100,8 @@ func (s *redisScheduler) StartScheduler(b Broker) error {
 	s.startEventDispatcher()
 	s.thumb = NewThumbnailTrigger(s.broker)
 	go s.thumb.Schedule()
+	s.share = NewShareGroupTrigger(s.broker)
+	go s.share.Schedule()
 	go s.pollLoop()
 	return nil
 }
@@ -252,6 +255,7 @@ func (s *redisScheduler) ShutdownScheduler(ctx context.Context) error {
 	fmt.Print("  shutting down redis scheduler...")
 	close(s.closed)
 	s.thumb.Unschedule()
+	s.share.Unschedule()
 	select {
 	case <-ctx.Done():
 		fmt.Println("failed: ", ctx.Err())
@@ -423,6 +427,13 @@ func (s *redisScheduler) GetTrigger(db prefixer.Prefixer, id string) (Trigger, e
 		webhook.SetCallback(s)
 	}
 	return t, nil
+}
+
+// UpdateMessage changes the message for the given trigger.
+func (s *redisScheduler) UpdateMessage(db prefixer.Prefixer, trigger Trigger, message json.RawMessage) error {
+	infos := trigger.Infos()
+	infos.Message = Message(message)
+	return couchdb.UpdateDoc(db, infos)
 }
 
 // UpdateCron will change the frequency of execution for the given trigger.

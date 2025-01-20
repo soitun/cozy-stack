@@ -21,6 +21,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
+	"github.com/cozy/cozy-stack/pkg/filetype"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/httpcache"
@@ -186,6 +187,12 @@ func ParseRawRequest(doctype, raw string) (*Remote, error) {
 	return &remote, nil
 }
 
+func lockDoctype(inst *instance.Instance, docID string) func() {
+	mu := config.Lock().ReadWrite(inst, docID)
+	_ = mu.Lock()
+	return mu.Unlock
+}
+
 // Find finds the request defined for the given doctype
 func Find(ins *instance.Instance, doctype string) (*Remote, error) {
 	var raw string
@@ -194,6 +201,7 @@ func Find(ins *instance.Instance, doctype string) (*Remote, error) {
 		dt := Doctype{
 			DocID: consts.Doctypes + "/" + doctype,
 		}
+		defer lockDoctype(ins, dt.DocID)()
 		err := couchdb.GetDoc(ins, consts.Doctypes, dt.DocID, &dt)
 		if err != nil || dt.UpdatedAt.Add(24*time.Hour).Before(time.Now()) {
 			rev := dt.Rev()
@@ -454,6 +462,10 @@ func ProxyRemoteAsset(name string, w http.ResponseWriter) error {
 		return ErrRemoteAssetNotFound
 	}
 
+	if build.IsDevRelease() && strings.HasPrefix(assetURL, "file:") {
+		return serveLocalRemoteAsset(assetURL, w)
+	}
+
 	req, err := http.NewRequest(http.MethodGet, assetURL, nil)
 	if err != nil {
 		return err
@@ -471,6 +483,27 @@ func ProxyRemoteAsset(name string, w http.ResponseWriter) error {
 	w.WriteHeader(res.StatusCode)
 
 	_, err = io.Copy(w, res.Body)
+	return err
+}
+
+func serveLocalRemoteAsset(assetURL string, w http.ResponseWriter) error {
+	u, err := url.Parse(assetURL)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Open(u.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	ext := path.Ext(u.Path)
+	mimetype := filetype.ByExtension(ext)
+	w.Header().Set(echo.HeaderContentType, mimetype)
+	w.WriteHeader(http.StatusOK)
+
+	_, err = io.Copy(w, f)
 	return err
 }
 

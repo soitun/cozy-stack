@@ -3,12 +3,11 @@ package testutils
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path"
@@ -29,6 +28,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/utils"
 	"github.com/gavv/httpexpect/v2"
+	"github.com/gofrs/uuid/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/ncw/swift/v2/swifttest"
 	"github.com/spf13/viper"
@@ -122,11 +122,9 @@ func NewSetup(t testing.TB, name string) *TestSetup {
 }
 
 // SetupSwiftTest can be used to start an in-memory Swift server for tests.
-func (c *TestSetup) SetupSwiftTest() error {
+func (c *TestSetup) SetupSwiftTest() {
 	swiftSrv, err := swifttest.NewSwiftServer("localhost")
-	if err != nil {
-		fmt.Printf("failed to create swift server %s", err)
-	}
+	require.NoError(c.t, err, "failed to create swift server")
 
 	viper.Set("swift.username", "swifttest")
 	viper.Set("swift.api_key", "swifttest")
@@ -147,8 +145,6 @@ func (c *TestSetup) SetupSwiftTest() error {
 	ctx := context.Background()
 	err = config.GetSwiftConnection().ContainerCreate(ctx, dynamic.DynamicAssetsContainerName, nil)
 	require.NoError(c.t, err, "Could not create dynamic container.")
-
-	return nil
 }
 
 // GetTestInstance creates an instance with a random host
@@ -159,7 +155,7 @@ func (c *TestSetup) GetTestInstance(opts ...*lifecycle.Options) *instance.Instan
 	}
 	var err error
 	if !stackStarted {
-		_, err = stack.Start(stack.NoGops, stack.NoDynAssets)
+		_, _, err = stack.Start(stack.NoGops, stack.NoDynAssets)
 		require.NoError(c.t, err, "Error while starting job system")
 		stackStarted = true
 	}
@@ -194,6 +190,21 @@ func (c *TestSetup) GetTestClient(scopes string) (*oauth.Client, string) {
 	}
 	client.Create(inst, oauth.NotPending)
 	token, err := c.inst.MakeJWT(consts.AccessTokenAudience, client.ClientID, scopes, "", time.Now())
+	require.NoError(c.t, err, "Cannot create oauth token")
+
+	return &client, token
+}
+
+// GetTestAdminClient creates an oauth client and associated token with access to admin routes
+func (c *TestSetup) GetTestAdminClient() (*oauth.Client, string) {
+	inst := c.GetTestInstance()
+	client := oauth.Client{
+		RedirectURIs: []string{"http://localhost/oauth/callback"},
+		ClientName:   "client-" + c.host,
+		SoftwareID:   "github.com/cozy/cozy-stack/testing/" + c.name,
+	}
+	client.Create(inst, oauth.NotPending)
+	token, err := c.inst.MakeJWT(consts.CLIAudience, client.ClientID, "*", "", time.Now())
 	require.NoError(c.t, err, "Cannot create oauth token")
 
 	return &client, token
@@ -240,51 +251,6 @@ func (c *TestSetup) GetTestServerMultipleRoutes(mpr map[string]func(*echo.Group)
 	c.t.Cleanup(ts.Close)
 	c.ts = ts
 	return ts
-}
-
-// CookieJar is a http.CookieJar which always returns all cookies.
-// NOTE golang stdlib uses cookies for the URL (ie the testserver),
-// not for the host (ie the instance), so we do it manually
-type CookieJar struct {
-	Jar *cookiejar.Jar
-	URL *url.URL
-}
-
-// Cookies implements http.CookieJar interface
-func (j *CookieJar) Cookies(u *url.URL) (cookies []*http.Cookie) {
-	return j.Jar.Cookies(j.URL)
-}
-
-// SetCookies implements http.CookieJar interface
-func (j *CookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.Jar.SetCookies(j.URL, cookies)
-}
-
-// Reset clears all the cookie
-func (j *CookieJar) Reset() error {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return err
-	}
-	j.Jar = jar
-	return nil
-}
-
-// GetCookieJar returns a cookie jar valable for test
-// the jar discard the url passed to Cookies and SetCookies and always use
-// the setup instance URL instead.
-func (c *TestSetup) GetCookieJar() *CookieJar {
-	instance := c.GetTestInstance()
-	instanceURL, err := url.Parse("https://" + instance.Domain + "/auth")
-	require.NoError(c.t, err, "Cant create cookie jar url")
-
-	j, err := cookiejar.New(nil)
-	require.NoError(c.t, err, "Cant create cookie jar url")
-
-	return &CookieJar{
-		Jar: j,
-		URL: instanceURL,
-	}
 }
 
 func (c *TestSetup) InstallMiniApp() (string, error) {
@@ -372,7 +338,7 @@ func (c *TestSetup) InstallMiniApp() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	err = createFile(instance, appdir, "index.html", `this is index.html. <a lang="{{.Locale}}" href="https://{{.Domain}}/status/">Status</a> {{.Favicon}}`)
+	err = createFile(instance, appdir, "index.html", `<html><body>this is index.html. <a lang="{{.Locale}}" href="https://{{.Domain}}/status/">Status</a> {{.Favicon}}</body></html>`)
 	if err != nil {
 		return "", err
 	}
@@ -438,6 +404,53 @@ func (c *TestSetup) InstallMiniKonnector() (string, error) {
 	return slug, err
 }
 
+func (c *TestSetup) InstallMiniClientSideKonnector() (string, error) {
+	slug := "mini-client-side-konnector"
+	instance := c.GetTestInstance()
+	c.t.Cleanup(func() { _ = permission.DestroyKonnector(instance, slug) })
+
+	permissions := permission.Set{
+		permission.Rule{
+			Type:  "io.cozy.apps.logs",
+			Verbs: permission.Verbs(permission.POST),
+		},
+	}
+	version := "1.0.0"
+	manifest := &couchdb.JSONDoc{
+		Type: consts.Konnectors,
+		M: map[string]interface{}{
+			"_id":         consts.Konnectors + "/" + slug,
+			"name":        "Mini",
+			"icon":        "icon.svg",
+			"slug":        slug,
+			"source":      "git://github.com/cozy/mini.git",
+			"state":       apps.Ready,
+			"permissions": permissions,
+			"version":     version,
+			"clientSide":  true,
+		},
+	}
+
+	err := couchdb.CreateNamedDoc(instance, manifest)
+	if err != nil {
+		return "", err
+	}
+
+	_, err = permission.CreateKonnectorSet(instance, slug, permissions, version)
+	if err != nil {
+		return "", err
+	}
+
+	konnDir := path.Join(vfs.KonnectorsDirName, slug, version)
+	_, err = vfs.MkdirAll(instance.VFS(), konnDir)
+	if err != nil {
+		return "", err
+	}
+
+	err = createFile(instance, konnDir, "icon.svg", "<svg>...</svg>")
+	return slug, err
+}
+
 func createFile(instance *instance.Instance, dir, filename, content string) error {
 	abs := path.Join(dir, filename+".br")
 	file, err := vfs.Create(instance.VFS(), abs)
@@ -455,4 +468,113 @@ func compress(content string) []byte {
 	_, _ = bw.Write([]byte(content))
 	_ = bw.Close()
 	return buf.Bytes()
+}
+
+type ManagerConfig struct {
+	URL              string
+	WithPremiumLinks bool
+}
+
+func WithManager(t *testing.T, inst *instance.Instance, managerConfig ManagerConfig) (shouldRemoveUUID bool) {
+	require.NotEmpty(t, managerConfig.URL, "Could not enable test instance manager: cloudery API URL is required")
+
+	if inst.UUID == "" {
+		uuid, err := uuid.NewV7()
+		require.NoError(t, err, "Could not enable test instance manager")
+		inst.UUID = uuid.String()
+		shouldRemoveUUID = true
+	}
+
+	cfg := config.GetConfig()
+	originalCfg, _ := json.Marshal(cfg)
+
+	if cfg.Clouderies == nil {
+		cfg.Clouderies = map[string]config.ClouderyConfig{}
+	}
+	cloudery, contextName := getCloudery(inst, cfg)
+	cloudery.API = config.ClouderyAPI{URL: managerConfig.URL, Token: ""}
+	cfg.Clouderies[contextName] = cloudery
+
+	if cfg.Contexts == nil {
+		cfg.Contexts = map[string]interface{}{}
+	}
+	context, contextName := getContext(inst, cfg)
+	context["manager_url"] = managerConfig.URL
+	context["enable_premium_links"] = managerConfig.WithPremiumLinks
+	cfg.Contexts[contextName] = context
+
+	t.Cleanup(func() {
+		json.Unmarshal(originalCfg, cfg)
+
+		if shouldRemoveUUID {
+			inst.UUID = ""
+			require.NoError(t, instance.Update(inst))
+		}
+	})
+
+	err := instance.Update(inst)
+	require.NoError(t, err, "Could not enable test instance manager")
+
+	return shouldRemoveUUID
+}
+
+// getCloudery returns the most relevant cloudery config depending on the
+// instance context name or creates a new one if none exist.
+// It also returns the name of the context associated with the config.
+func getCloudery(inst *instance.Instance, cfg *config.Config) (config.ClouderyConfig, string) {
+	if cloudery, ok := cfg.Clouderies[inst.ContextName]; ok {
+		return cloudery, inst.ContextName
+	}
+	if cloudery, ok := cfg.Clouderies[config.DefaultInstanceContext]; ok {
+		return cloudery, config.DefaultInstanceContext
+	}
+	return config.ClouderyConfig{}, config.DefaultInstanceContext
+}
+
+// getContext returns the most relevant context config depending on the
+// instance context name or creates a new one if none exist.
+// It also returns the name of the context associated with the config.
+func getContext(inst *instance.Instance, cfg *config.Config) (map[string]interface{}, string) {
+	if context, ok := cfg.Contexts[inst.ContextName].(map[string]interface{}); ok {
+		return context, inst.ContextName
+	}
+	if context, ok := cfg.Contexts[config.DefaultInstanceContext].(map[string]interface{}); ok {
+		return context, config.DefaultInstanceContext
+	}
+	return map[string]interface{}{}, config.DefaultInstanceContext
+}
+
+func DisableManager(inst *instance.Instance, shouldRemoveUUID bool) error {
+	config, ok := inst.SettingsContext()
+	if !ok {
+		return fmt.Errorf("Could not disable test instance manager: could not fetch test instance settings context")
+	}
+
+	config["enable_premium_links"] = false
+
+	if shouldRemoveUUID {
+		inst.UUID = ""
+		return instance.Update(inst)
+	}
+	return nil
+}
+
+func WithFlag(t *testing.T, inst *instance.Instance, name string, value interface{}) {
+	flags := inst.FeatureFlags
+	if flags == nil {
+		flags = map[string]interface{}{}
+	}
+
+	was := flags[name]
+
+	flags[name] = value
+	inst.FeatureFlags = flags
+	err := instance.Update(inst)
+	require.NoError(t, err, "Could not set %s flag value to %v", name, value)
+
+	t.Cleanup(func() {
+		flags[name] = was
+		inst.FeatureFlags = flags
+		require.NoError(t, instance.Update(inst))
+	})
 }

@@ -13,7 +13,7 @@
     {{.Favicon}}
     <link rel="preload" href="/assets/icons/check.svg" as="image">
   </head>
-  <body class="theme-inverted">
+  <body class="cirrus theme-inverted">
     {{if .MagicLink}}
     <form id="magic-link-form" method="POST" action="/auth/magic_link" class="d-contents">
     {{else}}
@@ -22,6 +22,7 @@
       <input id="redirect" type="hidden" name="redirect" value="{{.Redirect}}" />
       <input id="csrf_token" type="hidden" name="csrf_token" value="{{.CSRF}}" />
       <input id="trusted-device-token" type="hidden" name="trusted-device-token" value="" />
+      <input id="email_verified_code" type="hidden" name="email_verified_code" value="{{.EmailVerifiedCode}}" />
       <main class="wrapper">
 
         <header class="wrapper-top">
@@ -123,5 +124,6 @@
     <script src="{{asset .Domain "/scripts/password-helpers.js"}}"></script>
     <script src="{{asset .Domain "/scripts/password-visibility.js"}}"></script>
     <script src="{{asset .Domain "/scripts/login.js"}}"></script>
+    <iframe src="{{.DataProxyCleanURL}}" class="d-none"></iframe>
   </body>
 </html>

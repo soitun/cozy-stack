@@ -5,10 +5,12 @@ package public
 
 import (
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/pkg/assets"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/web/middlewares"
@@ -19,11 +21,16 @@ import (
 // Avatar returns the default avatar currently.
 func Avatar(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
+	err := inst.AvatarFS().ServeAvatarContent(c.Response(), c.Request())
+	if err != os.ErrNotExist {
+		return err
+	}
+
 	switch c.QueryParam("fallback") {
 	case "404":
 		// Nothing
 	case "initials":
-		publicName, err := inst.PublicName()
+		publicName, err := csettings.PublicName(inst)
 		if err != nil {
 			publicName = strings.Split(inst.Domain, ".")[0]
 		}
@@ -46,7 +53,13 @@ func Avatar(c echo.Context) error {
 // in the flagship app).
 func Prelogin(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
-	publicName, err := inst.PublicName()
+	if !inst.OnboardingFinished {
+		return c.JSON(http.StatusPreconditionFailed, echo.Map{
+			"error": "the instance has not been onboarded",
+		})
+	}
+
+	publicName, err := csettings.PublicName(inst)
 	if err != nil {
 		publicName = ""
 	}
@@ -62,6 +75,7 @@ func Prelogin(c echo.Context) error {
 		"OIDC":          oidc,
 		"FranceConnect": franceConnect,
 		"magic_link":    inst.MagicLink,
+		"locale":        inst.Locale,
 		"name":          publicName,
 	})
 }

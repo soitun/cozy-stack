@@ -10,12 +10,12 @@ import (
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
 	"github.com/cozy/cozy-stack/model/contact"
 	"github.com/cozy/cozy-stack/model/instance"
-	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/metadata"
 	"github.com/cozy/cozy-stack/web/middlewares"
+	"github.com/gofrs/uuid/v5"
 	"github.com/labstack/echo/v4"
 )
 
@@ -172,13 +172,13 @@ func CreateOrganization(c echo.Context) error {
 	}
 
 	org := req.toOrganization(inst)
-	collID, err := couchdb.UUID(inst)
+	collID, err := uuid.NewV7()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{
 			"error": err.Error(),
 		})
 	}
-	org.Collection.DocID = collID
+	org.Collection.DocID = collID.String()
 	if err := couchdb.CreateDoc(inst, org); err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{
 			"error": err.Error(),
@@ -284,7 +284,7 @@ func DeleteOrganization(c echo.Context) error {
 			"error": "invalid JSON",
 		})
 	}
-	if err := lifecycle.CheckPassphrase(inst, []byte(verification.Hash)); err != nil {
+	if err := instance.CheckPassphrase(inst, []byte(verification.Hash)); err != nil {
 		return c.JSON(http.StatusUnauthorized, echo.Map{
 			"error": "invalid password",
 		})

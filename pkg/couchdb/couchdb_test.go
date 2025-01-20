@@ -3,6 +3,7 @@ package couchdb
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -37,7 +38,7 @@ func TestCouchdb(t *testing.T) {
 		t.Skip("a couchdb is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 
 	if _, err := CheckStatus(context.Background()); err != nil {
 		require.NoError(t, err, "This test need couchdb to run.")
@@ -190,11 +191,20 @@ func TestCouchdb(t *testing.T) {
 	})
 
 	t.Run("DefineIndex", func(t *testing.T) {
-		err := DefineIndex(TestPrefix, mango.IndexOnFields(TestDoctype, "my-index", []string{"fieldA", "fieldB"}))
+		err := DefineIndex(TestPrefix, mango.MakeIndex(TestDoctype, "my-index", mango.IndexDef{Fields: []string{"fieldA", "fieldB"}}))
 		assert.NoError(t, err)
 
 		// if I try to define the same index several time
-		err2 := DefineIndex(TestPrefix, mango.IndexOnFields(TestDoctype, "my-index", []string{"fieldA", "fieldB"}))
+		err2 := DefineIndex(TestPrefix, mango.MakeIndex(TestDoctype, "my-index", mango.IndexDef{Fields: []string{"fieldA", "fieldB"}}))
+		assert.NoError(t, err2)
+	})
+
+	t.Run("DefineIndexWithPartialFilter", func(t *testing.T) {
+		err := DefineIndex(TestPrefix, mango.MakeIndex(TestDoctype, "my-index-with-partial-filter", mango.IndexDef{Fields: []string{"fieldA"}, PartialFilter: mango.NotExists("fieldB")}))
+		assert.NoError(t, err)
+
+		// if I try to define the same index several time
+		err2 := DefineIndex(TestPrefix, mango.MakeIndex(TestDoctype, "my-index-with-partial-filter", mango.IndexDef{Fields: []string{"fieldA"}, PartialFilter: mango.NotExists("fieldB")}))
 		assert.NoError(t, err2)
 	})
 
@@ -214,7 +224,7 @@ func TestCouchdb(t *testing.T) {
 			}
 		}
 
-		err := DefineIndex(TestPrefix, mango.IndexOnFields(TestDoctype, "my-index", []string{"fieldA", "fieldB"}))
+		err := DefineIndex(TestPrefix, mango.MakeIndex(TestDoctype, "my-index", mango.IndexDef{Fields: []string{"fieldA", "fieldB"}}))
 		if !assert.NoError(t, err) {
 			t.FailNow()
 			return
@@ -251,6 +261,34 @@ func TestCouchdb(t *testing.T) {
 			assert.Equal(t, doc1.ID(), out2[0].ID())
 			assert.Equal(t, doc5.ID(), out2[1].ID())
 		}
+	})
+
+	t.Run("ForeachDocs", func(t *testing.T) {
+		for i := 0; i < 5; i++ {
+			doc := &testDoc{Test: fmt.Sprintf("foreach_%d", i)}
+			require.NoError(t, CreateDoc(TestPrefix, doc))
+		}
+
+		var results []*testDoc
+		err := GetAllDocs(TestPrefix, TestDoctype, &AllDocsRequest{}, &results)
+		require.NoError(t, err)
+		var expected []string
+		for _, result := range results {
+			expected = append(expected, result.Test)
+		}
+
+		var keys []string
+		ForeachDocsWithCustomPagination(TestPrefix, TestDoctype, 2, func(id string, raw json.RawMessage) error {
+			var doc testDoc
+			err := json.Unmarshal(raw, &doc)
+			if err != nil {
+				return err
+			}
+			keys = append(keys, doc.Test)
+			return nil
+		})
+
+		assert.Equal(t, expected, keys)
 	})
 
 	t.Run("ChangesSuccess", func(t *testing.T) {
@@ -312,12 +350,6 @@ func TestCouchdb(t *testing.T) {
 		assert.NoError(t, EnsureDBExist(TestPrefix, "io.cozy.tests.db1"))
 		_, err = DBStatus(TestPrefix, "io.cozy.tests.db1")
 		assert.NoError(t, err)
-	})
-
-	t.Run("UUID", func(t *testing.T) {
-		uuid, err := UUID(TestPrefix)
-		assert.NoError(t, err)
-		assert.Len(t, uuid, 32)
 	})
 
 	t.Run("UpdateJSONDoc", func(t *testing.T) {

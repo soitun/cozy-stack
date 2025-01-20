@@ -7,14 +7,16 @@ on:
       - 'cmd/*.go'
 jobs:
   build_cli:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Install Go
-        uses: actions/setup-go@v4
+        uses: actions/checkout@v4
         with:
-          go-version: '1.20.x'
+          token: ${{ secrets.COZYBOT_ACCESS_TOKEN }}
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
       - name: Install
         run: |
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
@@ -22,7 +24,7 @@ jobs:
       - name: Build
         run: |
           make cli
-      - uses: stefanzweifel/git-auto-commit-action@v4.16.0
+      - uses: stefanzweifel/git-auto-commit-action@v5.0.1
         with:
           commit_message: Build CLI docs and shell completions
           branch: master

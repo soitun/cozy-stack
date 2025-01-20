@@ -42,7 +42,7 @@ func TestRedisScheduler(t *testing.T) {
 	setup := testutils.NewSetup(t, t.Name())
 	testInstance := setup.GetTestInstance()
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	opts, _ := redis.ParseURL(redisURL)
 	client := redis.NewClient(opts)
 	t.Cleanup(func() {
@@ -59,7 +59,7 @@ func TestRedisScheduler(t *testing.T) {
 				Concurrency:  1,
 				MaxExecCount: 1,
 				Timeout:      1 * time.Millisecond,
-				WorkerFunc: func(ctx *job.WorkerContext) error {
+				WorkerFunc: func(ctx *job.TaskContext) error {
 					var msg string
 					if err := ctx.UnmarshalMessage(&msg); err != nil {
 						return err

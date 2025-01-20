@@ -1,15 +1,18 @@
 package vfs
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"mime"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/labstack/echo/v4"
@@ -252,6 +255,28 @@ func ServeFileContent(fs VFS, doc *FileDoc, version *Version, filename, disposit
 	return nil
 }
 
+// ServePDFPage replies to an http request with a single page from a PDF file.
+func ServePDFPage(fs VFS, doc *FileDoc, disposition string, page int, req *http.Request, w http.ResponseWriter) error {
+	ext := filepath.Ext(doc.DocName)
+	basename := strings.TrimSuffix(doc.DocName, ext)
+	filename := fmt.Sprintf("%s (%d)%s", basename, page, ext)
+
+	f, err := fs.OpenFile(doc)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	extracted, err := config.PDF().ExtractPage(f, page)
+	if err != nil {
+		return err
+	}
+	content := bytes.NewReader(extracted.Bytes())
+
+	http.ServeContent(w, req, filename, doc.UpdatedAt, content)
+	return nil
+}
+
 // ModifyFileMetadata modify the metadata associated to a file. It can
 // be used to rename or move the file in the VFS.
 func ModifyFileMetadata(fs VFS, olddoc *FileDoc, patch *DocPatch) (*FileDoc, error) {
@@ -263,14 +288,19 @@ func ModifyFileMetadata(fs VFS, olddoc *FileDoc, patch *DocPatch) (*FileDoc, err
 	if patch.RestorePath != nil {
 		trashed = *patch.RestorePath != ""
 	}
+	var oldFavorite *bool
+	if olddoc.CozyMetadata != nil {
+		oldFavorite = &olddoc.CozyMetadata.Favorite
+	}
 	patch, err = normalizeDocPatch(&DocPatch{
-		Name:        &oname,
-		DirID:       &olddoc.DirID,
-		RestorePath: &olddoc.RestorePath,
-		Tags:        &olddoc.Tags,
-		UpdatedAt:   &olddoc.UpdatedAt,
-		Executable:  &olddoc.Executable,
-		Encrypted:   &olddoc.Encrypted,
+		Name:         &oname,
+		DirID:        &olddoc.DirID,
+		RestorePath:  &olddoc.RestorePath,
+		Tags:         &olddoc.Tags,
+		UpdatedAt:    &olddoc.UpdatedAt,
+		Executable:   &olddoc.Executable,
+		Encrypted:    &olddoc.Encrypted,
+		CozyMetadata: CozyMetadataPatch{Favorite: oldFavorite},
 	}, patch, cdate)
 	if err != nil {
 		return nil, err
@@ -315,6 +345,9 @@ func ModifyFileMetadata(fs VFS, olddoc *FileDoc, patch *DocPatch) (*FileDoc, err
 	newdoc.ReferencedBy = olddoc.ReferencedBy
 	newdoc.CozyMetadata = olddoc.CozyMetadata
 	newdoc.InternalID = olddoc.InternalID
+	if newdoc.CozyMetadata != nil && patch.CozyMetadata.Favorite != nil {
+		newdoc.CozyMetadata.Favorite = *patch.CozyMetadata.Favorite
+	}
 
 	if err = fs.UpdateFileDoc(olddoc, newdoc); err != nil {
 		return nil, err

@@ -1,3 +1,6 @@
+// Package vfsafero is the implementation of the Virtual File System by using
+// afero. Afero is a library for manipulating files and directory on the local
+// file system.
 package vfsafero
 
 import (
@@ -15,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/cozy/cozy-stack/model/vfs"
-	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/filetype"
 	"github.com/cozy/cozy-stack/pkg/lock"
 
@@ -573,6 +575,30 @@ func (afs *aferoVFS) RevertFileVersion(doc *vfs.FileDoc, version *vfs.Version) e
 	return nil
 }
 
+func (afs *aferoVFS) CopyFileFromOtherFS(
+	newdoc, olddoc *vfs.FileDoc,
+	srcFS vfs.Fs,
+	srcDoc *vfs.FileDoc,
+) error {
+	content, err := srcFS.OpenFile(srcDoc)
+	if err != nil {
+		return err
+	}
+	defer content.Close()
+
+	fd, err := afs.CreateFile(newdoc, olddoc)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(fd, content)
+	errc := fd.Close()
+	if err != nil {
+		return err
+	}
+	return errc
+}
+
 // UpdateFileDoc overrides the indexer's one since the afero.Fs is by essence
 // also indexed by path. When moving a file, the index has to be moved and the
 // filesystem should also be updated.
@@ -772,14 +798,12 @@ func (f *aferoFileCreation) Write(p []byte) (int, error) {
 func (f *aferoFileCreation) Close() (err error) {
 	defer func() {
 		if err != nil {
-			// remove the temporary file if an error occurred
+			// Remove the temporary file if an error occurred
 			_ = f.afs.fs.Remove(f.tmppath)
-			// If an error has occurred that is not due to the index update, we should
-			// delete the file from the index.
+			// If an error has occurred when creating a new file, we should
+			// also delete the file from the index.
 			if f.olddoc == nil {
-				if _, isCouchErr := couchdb.IsCouchError(err); !isCouchErr {
-					_ = f.afs.Indexer.DeleteFileDoc(f.newdoc)
-				}
+				_ = f.afs.Indexer.DeleteFileDoc(f.newdoc)
 			}
 		}
 	}()

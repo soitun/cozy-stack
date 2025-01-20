@@ -34,7 +34,6 @@ import (
 	"github.com/cozy/cozy-stack/web/jobs"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/labstack/echo/v4"
-	"github.com/sirupsen/logrus"
 )
 
 // JSMimeType is the content-type for javascript
@@ -107,10 +106,13 @@ func getHandler(appType consts.AppType) echo.HandlerFunc {
 		if err := middlewares.Allow(c, permission.GET, man); err != nil {
 			return err
 		}
+
+		registries := instance.Registries()
+		copier := app.Copier(man.AppType(), instance)
+		man = app.DoLazyUpdate(instance, man, copier, registries)
+
 		if appType == consts.WebappType {
-			registries := instance.Registries()
-			copier := app.Copier(consts.WebappType, instance)
-			man = app.DoLazyUpdate(instance, man, copier, registries)
+			// TODO: Check is this line is really necessary
 			man.(*app.WebappManifest).Instance = instance
 		}
 		return jsonapi.Data(c, http.StatusOK, &apiApp{man}, nil)
@@ -251,26 +253,40 @@ func logsHandler(appType consts.AppType) echo.HandlerFunc {
 			}
 		}
 
+		clientSide := false
+		if appType == consts.KonnectorType {
+			man, err := app.GetKonnectorBySlug(inst, slug)
+			if err != nil {
+				return wrapAppsError(err)
+			}
+			clientSide = man.ClientSide()
+		}
+
 		var logs []AppLog
 		if err := json.NewDecoder(c.Request().Body).Decode(&logs); err != nil {
 			return jsonapi.BadJSON()
 		}
 
-		logger := logger.WithDomain(inst.Domain).
-			WithNamespace("jobs").
+		l := logger.WithDomain(inst.Domain).WithNamespace("jobs").
 			WithField("slug", slug).
 			WithField("job_id", c.QueryParam("job_id"))
 
-		if v := c.QueryParam("version"); v != "" {
-			logger = logger.WithField("version", v)
+		if clientSide {
+			l = l.WithField("worker_id", "client")
 		}
-
 		for _, log := range logs {
-			level, err := logrus.ParseLevel(log.Level)
+			level, err := logger.ParseLevel(log.Level)
 			if err != nil {
 				return jsonapi.InvalidAttribute("level", err)
 			}
-			logger.WithTime(log.Time).Log(level, log.Msg)
+
+			l := l.WithTime(log.Time)
+
+			if v := c.QueryParam("version"); v != "" {
+				l = l.WithField("version", v)
+			}
+
+			l.Log(level, log.Msg)
 		}
 
 		return c.NoContent(http.StatusNoContent)
@@ -395,7 +411,7 @@ func findAccountsToDelete(instance *instance.Instance, slug string) ([]account.C
 
 	var toDelete []account.CleanEntry
 	for _, t := range triggers {
-		if t.Infos().WorkerType != "konnector" {
+		if !t.Infos().IsKonnectorTrigger() {
 			continue
 		}
 
@@ -442,7 +458,7 @@ func deleteKonnectorWithAccounts(instance *instance.Instance, man *app.KonnManif
 				}
 				stack := make([]byte, 4<<10) // 4 KB
 				length := runtime.Stack(stack, false)
-				log := instance.Logger().WithField("panic", true).WithNamespace("konnectors")
+				log := instance.Logger().WithNamespace("konnectors").WithField("panic", true)
 				log.Errorf("PANIC RECOVER %s: %s", err.Error(), stack[:length])
 			}
 		}()
@@ -662,7 +678,6 @@ func iconHandler(appType consts.AppType) echo.HandlerFunc {
 				fs = app.AppsFileServer(instance)
 			}
 		case consts.KonnectorType:
-			a := a.(*app.KonnManifest)
 			filepath = path.Join("/", a.Icon())
 			fs = app.KonnectorsFileServer(instance)
 		}
@@ -744,6 +759,7 @@ func (o *apiOpenParams) MarshalJSON() ([]byte, error) {
 	data["ThemeCSS"] = o.params.ThemeCSS()
 	data["Favicon"] = o.params.Favicon()
 	data["DefaultWallpaper"] = o.params.DefaultWallpaper()
+	data["Warnings"], _ = o.params.Warnings()
 	return json.Marshal(data)
 }
 

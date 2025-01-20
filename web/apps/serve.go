@@ -18,6 +18,7 @@ import (
 	"github.com/cozy/cozy-stack/model/intent"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/session"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/model/sharing"
 	"github.com/cozy/cozy-stack/pkg/appfs"
 	"github.com/cozy/cozy-stack/pkg/assets"
@@ -132,7 +133,9 @@ func handleIntent(c echo.Context, i *instance.Instance, slug, intentID string) {
 		return
 	}
 	from := i.SubDomain(parts[1]).String()
-	middlewares.AppendCSPRule(c, "frame-ancestors", from)
+	if !config.GetConfig().CSPDisabled {
+		middlewares.AppendCSPRule(c, "frame-ancestors", from)
+	}
 }
 
 // ServeAppFile will serve the requested file using the specified application
@@ -241,8 +244,27 @@ func ServeAppFile(c echo.Context, i *instance.Instance, fs appfs.FileServer, web
 		}
 	}
 
+	// For share by link, show the password page if it is password protected.
+	code := c.QueryParam("sharecode")
+	token, err := middlewares.TransformShortcodeToJWT(i, code)
+	if err == nil {
+		claims, err := middlewares.ExtractClaims(c, i, token)
+		if err == nil && claims.AudienceString() == consts.ShareAudience {
+			pdoc, err := permission.GetForShareCode(i, token)
+			if err == nil && pdoc.Password != nil && !middlewares.HasCookieForPassword(c, i, pdoc.ID()) {
+				return renderPasswordPage(c, i, pdoc.ID())
+			}
+		}
+	}
+
 	if intentID := c.QueryParam("intent"); intentID != "" {
 		handleIntent(c, i, slug, intentID)
+	}
+
+	if route.Public && slug == consts.DataProxySlug {
+		// Allow to dataproxy to be embedded in a iframe from the login page of the
+		// stack for cleaning.
+		middlewares.AppendCSPRule(c, "frame-ancestors", i.PageURL("/", nil))
 	}
 
 	// For index file, we inject the locale, the stack domain, and a token if the
@@ -258,7 +280,31 @@ func ServeAppFile(c echo.Context, i *instance.Instance, fs appfs.FileServer, web
 		return err
 	}
 
-	tmpl, err := template.New(file).Parse(string(buf))
+	// XXX: Force include Warnings template in all app indexes
+	tmplText := string(buf)
+	if closeTagIdx := strings.Index(tmplText, "</head>"); closeTagIdx >= 0 {
+		tmplText = tmplText[:closeTagIdx] + "\n{{.Warnings}}\n" + tmplText[closeTagIdx:]
+	} else {
+		needsOpenTag := true
+		if openTagIdx := strings.Index(tmplText, "<head>"); openTagIdx >= 0 {
+			needsOpenTag = false
+		}
+
+		if bodyTagIdx := strings.Index(tmplText, "<body>"); bodyTagIdx >= 0 {
+			before := tmplText[:bodyTagIdx]
+			after := tmplText[bodyTagIdx:]
+
+			tmplText = before
+
+			if needsOpenTag {
+				tmplText += "\n<head>"
+			}
+
+			tmplText += "\n{{.Warnings}}\n</head>\n" + after
+		}
+	}
+
+	tmpl, err := template.New(file).Parse(tmplText)
 	if err != nil {
 		i.Logger().WithNamespace("apps").Warnf("%s cannot be parsed as a template: %s", file, err)
 		return fs.ServeFileContent(c.Response(), c.Request(), slug, version, shasum, filepath)
@@ -267,6 +313,14 @@ func ServeAppFile(c echo.Context, i *instance.Instance, fs appfs.FileServer, web
 	sessID := ""
 	if isLoggedIn {
 		sessID = sess.ID()
+
+		if file == "" || file == route.Index {
+			if !route.Public {
+				if handled, err := middlewares.CheckOAuthClientsLimitExceeded(c); handled {
+					return err
+				}
+			}
+		}
 	}
 	params := buildServeParams(c, i, webapp, isLoggedIn, sessID)
 
@@ -377,7 +431,7 @@ func getServeToken(
 }
 
 func renderMovedLink(c echo.Context, i *instance.Instance, to, subdomainType string) error {
-	name, _ := i.PublicName()
+	name, _ := csettings.PublicName(i)
 	link := *c.Request().URL
 	if u, err := url.Parse(to); err == nil {
 		parts := strings.SplitN(c.Request().Host, ".", 2)
@@ -403,6 +457,19 @@ func renderMovedLink(c echo.Context, i *instance.Instance, to, subdomainType str
 		"ThemeCSS":    middlewares.ThemeCSS(i),
 		"Favicon":     middlewares.Favicon(i),
 		"Link":        link.String(),
+	})
+}
+
+func renderPasswordPage(c echo.Context, inst *instance.Instance, permID string) error {
+	return c.Render(http.StatusUnauthorized, "share_by_link_password.html", echo.Map{
+		"Action":      inst.PageURL("/auth/share-by-link/password", nil),
+		"Domain":      inst.ContextualDomain(),
+		"ContextName": inst.ContextName,
+		"Locale":      inst.Locale,
+		"Title":       inst.TemplateTitle(),
+		"ThemeCSS":    middlewares.ThemeCSS(inst),
+		"Favicon":     middlewares.Favicon(inst),
+		"PermID":      permID,
 	})
 }
 
@@ -515,11 +582,11 @@ func (s serveParams) GetFlags() *feature.Flags {
 }
 
 func (s serveParams) CozyBar() (template.HTML, error) {
-	return cozybar(s.instance, s.isLoggedIn)
+	return cozybarHTML(s.instance, s.isLoggedIn)
 }
 
 func (s serveParams) CozyClientJS() (template.HTML, error) {
-	return cozyclientjs(s.instance)
+	return cozyclientjsHTML(s.instance)
 }
 
 func (s serveParams) CozyFonts() template.HTML {
@@ -541,8 +608,13 @@ func (s serveParams) DefaultWallpaper() string {
 		s.instance.ContextName)
 }
 
+func (s serveParams) Warnings() (template.HTML, error) {
+	return warningsHTML(s.instance, s.isLoggedIn)
+}
+
 var clientTemplate *template.Template
 var barTemplate *template.Template
+var warningsTemplate *template.Template
 
 // BuildTemplates ensure that cozy-client-js and the bar can be injected in templates
 func BuildTemplates() {
@@ -553,16 +625,19 @@ func BuildTemplates() {
 	barTemplate = template.Must(template.New("cozy-bar").Funcs(middlewares.FuncsMap).Parse(`
 <link rel="stylesheet" type="text/css" href="{{asset .Domain "/fonts/fonts.css" .ContextName}}">
 <link rel="stylesheet" type="text/css" href="{{asset .Domain "/css/cozy-bar.min.css" .ContextName}}">
+<script src="{{asset .Domain "/js/cozy-bar.min.js" .ContextName}}"></script>`,
+	))
+
+	warningsTemplate = template.Must(template.New("warnings").Funcs(middlewares.FuncsMap).Parse(`
 {{if .LoggedIn}}
 {{range .Warnings}}
-<meta name="user-action-required" data-title="{{ .Title }}" data-code="{{ .Code }}" data-detail="{{ .Detail }}" data-links="{{ .Links.Self }}" />
+<meta name="user-action-required" data-title="{{ .Title }}" data-code="{{ .Code }}" data-detail="{{ .Detail }}" {{with .Links}}{{with .Self}}data-links="{{ . }}"{{end}}{{end}} />
 {{end}}
-{{end}}
-<script src="{{asset .Domain "/js/cozy-bar.min.js" .ContextName}}"></script>`,
+{{end}}`,
 	))
 }
 
-func cozyclientjs(i *instance.Instance) (template.HTML, error) {
+func cozyclientjsHTML(i *instance.Instance) (template.HTML, error) {
 	buf := new(bytes.Buffer)
 	err := clientTemplate.Execute(buf, echo.Map{
 		"Domain":      i.ContextualDomain(),
@@ -574,13 +649,25 @@ func cozyclientjs(i *instance.Instance) (template.HTML, error) {
 	return template.HTML(buf.String()), nil
 }
 
-func cozybar(i *instance.Instance, loggedIn bool) (template.HTML, error) {
+func cozybarHTML(i *instance.Instance, loggedIn bool) (template.HTML, error) {
 	buf := new(bytes.Buffer)
 	err := barTemplate.Execute(buf, echo.Map{
 		"Domain":      i.ContextualDomain(),
-		"Warnings":    i.Warnings(),
+		"Warnings":    middlewares.ListWarnings(i),
 		"ContextName": i.ContextName,
 		"LoggedIn":    loggedIn,
+	})
+	if err != nil {
+		return "", err
+	}
+	return template.HTML(buf.String()), nil
+}
+
+func warningsHTML(i *instance.Instance, loggedIn bool) (template.HTML, error) {
+	buf := new(bytes.Buffer)
+	err := warningsTemplate.Execute(buf, echo.Map{
+		"Warnings": middlewares.ListWarnings(i),
+		"LoggedIn": loggedIn,
 	})
 	if err != nil {
 		return "", err

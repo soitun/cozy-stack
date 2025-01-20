@@ -10,6 +10,7 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/oauth"
+	"github.com/cozy/cozy-stack/model/session"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -91,7 +92,7 @@ func canCreateSessionCode(c echo.Context, inst *instance.Instance) canCreateSess
 	if err := c.Bind(&args); err != nil {
 		return cannotCreateSessionCode
 	}
-	if err := lifecycle.CheckPassphrase(inst, []byte(args.Passphrase)); err != nil {
+	if err := instance.CheckPassphrase(inst, []byte(args.Passphrase)); err != nil {
 		return cannotCreateSessionCode
 	}
 
@@ -180,6 +181,7 @@ type loginFlagshipParameters struct {
 	Passphrase        string `json:"passphrase"`
 	TwoFactorPasscode string `json:"two_factor_passcode"`
 	TwoFactorToken    string `json:"two_factor_token"`
+	EmailVerifiedCode string `json:"email_verified_code"`
 }
 
 func loginFlagship(c echo.Context) error {
@@ -190,7 +192,7 @@ func loginFlagship(c echo.Context) error {
 		return jsonapi.Errorf(http.StatusBadRequest, "%s", err)
 	}
 
-	if lifecycle.CheckPassphrase(inst, []byte(args.Passphrase)) != nil {
+	if instance.CheckPassphrase(inst, []byte(args.Passphrase)) != nil {
 		err := config.GetRateLimiter().CheckRateLimit(inst, limits.AuthType)
 		if limits.IsLimitReachedOrExceeded(err) {
 			if err = LoginRateExceeded(inst); err != nil {
@@ -202,8 +204,8 @@ func loginFlagship(c echo.Context) error {
 		})
 	}
 
-	if inst.HasAuthMode(instance.TwoFactorMail) {
-		if len(args.TwoFactorPasscode) == 0 || len(args.TwoFactorToken) == 0 {
+	if inst.HasAuthMode(instance.TwoFactorMail) && !inst.CheckEmailVerifiedCode(args.EmailVerifiedCode) {
+		if len(args.TwoFactorToken) == 0 {
 			twoFactorToken, err := lifecycle.SendTwoFactorPasscode(inst)
 			if err != nil {
 				return err
@@ -244,6 +246,12 @@ func loginFlagship(c echo.Context) error {
 		client.ClientID = ""
 		_ = couchdb.UpdateDoc(inst, client)
 		client.ClientID = client.CouchID
+	}
+
+	if err := session.SendNewRegistrationNotification(inst, client.ClientID); err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{
+			"error": err.Error(),
+		})
 	}
 
 	out := AccessTokenReponse{

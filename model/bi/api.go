@@ -7,17 +7,20 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
+	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/safehttp"
 )
 
 type apiClient struct {
-	host string
+	host     string
+	basePath string
 }
 
-func newApiClient(rawURL string) (*apiClient, error) {
+func newAPIClient(rawURL string) (*apiClient, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
@@ -25,14 +28,14 @@ func newApiClient(rawURL string) (*apiClient, error) {
 	if strings.Contains(u.Host, ":") {
 		return nil, errors.New("port not allowed in BI url")
 	}
-	return &apiClient{host: u.Host}, nil
+	return &apiClient{host: u.Host, basePath: u.Path}, nil
 }
 
-func (c *apiClient) makeRequest(verb, path, token string, body io.Reader) (*http.Response, error) {
+func (c *apiClient) makeRequest(verb, endpointPath, token string, body io.Reader) (*http.Response, error) {
 	u := &url.URL{
 		Scheme: "https",
 		Host:   c.host,
-		Path:   path,
+		Path:   path.Join(c.basePath, endpointPath),
 	}
 	req, err := http.NewRequest(verb, u.String(), body)
 	if err != nil {
@@ -58,7 +61,7 @@ type connectionsResponse struct {
 	Total int `json:"total"`
 }
 
-func (c *apiClient) getNumberOfConnections(token string) (int, error) {
+func (c *apiClient) getNumberOfConnections(inst *instance.Instance, token string) (int, error) {
 	res, err := c.get("/users/me/connections", token)
 	if err != nil {
 		return 0, err
@@ -80,11 +83,29 @@ func (c *apiClient) getNumberOfConnections(token string) (int, error) {
 		if len(msg) > 200 {
 			msg = msg[0:198] + "..."
 		}
-		logger.WithNamespace("bi").
-			Warnf("getNumberOfConnections [%d] cannot parse JSON %s: %s", res.StatusCode, msg, err)
+		log := inst.Logger().WithNamespace("bi")
+		log.Warnf("getNumberOfConnections [%d] cannot parse JSON %s: %s", res.StatusCode, msg, err)
+		if log.IsDebug() {
+			log.Debugf("getNumberOfConnections called with token %s", token)
+			logFullHTML(log, string(body))
+		}
 		return 0, err
 	}
 	return data.Total, nil
+}
+
+func logFullHTML(log *logger.Entry, msg string) {
+	i := 0
+	for len(msg) > 0 {
+		idx := len(msg)
+		if idx > 1800 {
+			idx = 1800
+		}
+		part := msg[:idx]
+		log.Debugf("getNumberOfConnections %d: %s", i, part)
+		i++
+		msg = msg[idx:]
+	}
 }
 
 func (c *apiClient) deleteUser(token string) error {

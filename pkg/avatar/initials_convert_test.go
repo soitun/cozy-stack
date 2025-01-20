@@ -2,7 +2,6 @@ package avatar
 
 import (
 	"bytes"
-	"context"
 	"image/png"
 	"os"
 	"testing"
@@ -10,17 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestInitialsPNG(t *testing.T) {
+func Test_Initials_PNG(t *testing.T) {
 	if testing.Short() {
 		t.Skipf("this test require the \"convert\" binary, skip it due to the \"--short\" flag")
 	}
 
-	client, err := NewPNGInitials("convert")
-	require.NoError(t, err)
-
-	ctx := context.Background()
-
-	rawRes, err := client.Generate(ctx, "JD", "#FF7F1B")
+	client := NewPNGInitials("convert")
+	rawRes, err := client.Generate("JD", "#FF7F1B")
 	require.NoError(t, err)
 
 	rawExpected, err := os.ReadFile("./testdata/initials-convert.png")

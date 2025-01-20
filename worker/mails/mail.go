@@ -30,12 +30,13 @@ var mailTemplater MailTemplater
 var sendMail = doSendMail
 
 // SendMail is the sendmail worker function.
-func SendMail(ctx *job.WorkerContext) error {
+func SendMail(ctx *job.TaskContext) error {
 	opts := mail.Options{}
 	err := ctx.UnmarshalMessage(&opts)
 	if err != nil {
 		return err
 	}
+
 	from := config.GetConfig().NoReplyAddr
 	name := config.GetConfig().NoReplyName
 	replyTo := config.GetConfig().ReplyTo
@@ -53,28 +54,52 @@ func SendMail(ctx *job.WorkerContext) error {
 			replyTo = reply
 		}
 	}
+
+	var cfgPerContext map[string]interface{}
+	if opts.Mode == mail.ModeCampaign {
+		cfgPerContext = config.GetConfig().CampaignMailPerContext
+	} else {
+		cfgPerContext = config.GetConfig().MailPerContext
+	}
+
 	ctxName := ctx.Instance.ContextName
-	cfgPerContext := config.GetConfig().MailPerContext
 	if ctxConfig, ok := cfgPerContext[ctxName].(map[string]interface{}); ok {
 		if host, ok := ctxConfig["host"].(string); ok && host != "" {
 			port, _ := ctxConfig["port"].(int)
 			username, _ := ctxConfig["username"].(string)
 			password, _ := ctxConfig["username"].(string)
+			UseSSL, _ := ctxConfig["use_ssl"].(bool)
 			disableTLS, _ := ctxConfig["disable_tls"].(bool)
 			skipCertValid, _ := ctxConfig["skip_certificate_validation"].(bool)
+			LocalName, _ := ctxConfig["local_name"].(string)
+
 			opts.Dialer = &gomail.DialerOptions{
 				Host:                      host,
 				Port:                      port,
 				Username:                  username,
 				Password:                  password,
+				NativeTLS:                 UseSSL,
 				DisableTLS:                disableTLS,
 				SkipCertificateValidation: skipCertValid,
+				LocalName:                 LocalName,
 			}
 		}
 	}
+
 	switch opts.Mode {
-	case mail.ModeFromStack:
+	case mail.ModeFromStack, mail.ModeCampaign:
 		toAddr, err := addressFromInstance(ctx.Instance)
+		if err != nil {
+			return err
+		}
+		opts.To = []*mail.Address{toAddr}
+		opts.From = &mail.Address{Name: name, Email: from}
+		if replyTo != "" {
+			opts.ReplyTo = &mail.Address{Name: name, Email: replyTo}
+		}
+		opts.RecipientName = toAddr.Name
+	case mail.ModePendingEmail:
+		toAddr, err := pendingAddress(ctx.Instance)
 		if err != nil {
 			return err
 		}
@@ -118,6 +143,22 @@ func SendMail(ctx *job.WorkerContext) error {
 	return err
 }
 
+func pendingAddress(i *instance.Instance) (*mail.Address, error) {
+	doc, err := i.SettingsDocument()
+	if err != nil {
+		return nil, err
+	}
+	email, ok := doc.M["pending_email"].(string)
+	if !ok {
+		return nil, fmt.Errorf("Domain %s has no pending email in its settings", i.Domain)
+	}
+	publicName, _ := doc.M["public_name"].(string)
+	return &mail.Address{
+		Name:  publicName,
+		Email: email,
+	}, nil
+}
+
 func addressFromInstance(i *instance.Instance) (*mail.Address, error) {
 	doc, err := i.SettingsDocument()
 	if err != nil {
@@ -134,7 +175,7 @@ func addressFromInstance(i *instance.Instance) (*mail.Address, error) {
 	}, nil
 }
 
-func doSendMail(ctx *job.WorkerContext, opts *mail.Options, domain string) error {
+func doSendMail(ctx *job.TaskContext, opts *mail.Options, domain string) error {
 	if opts.TemplateName == "" && opts.Subject == "" {
 		return errors.New("Missing mail subject")
 	}
@@ -147,7 +188,11 @@ func doSendMail(ctx *job.WorkerContext, opts *mail.Options, domain string) error
 	email := gomail.NewMessage()
 	dialerOptions := opts.Dialer
 	if dialerOptions == nil {
-		dialerOptions = config.GetConfig().Mail
+		if opts.Mode == mail.ModeCampaign {
+			dialerOptions = config.GetConfig().CampaignMail
+		} else {
+			dialerOptions = config.GetConfig().Mail
+		}
 	}
 	if dialerOptions.Host == "-" {
 		return nil
@@ -232,7 +277,7 @@ func addPart(mail *gomail.Message, part *mail.Part) error {
 	return nil
 }
 
-func sendSupportMail(ctx *job.WorkerContext, opts *mail.Options, domain string) error {
+func sendSupportMail(ctx *job.TaskContext, opts *mail.Options, domain string) error {
 	email := gomail.NewMessage()
 	dialerOptions := opts.Dialer
 	if dialerOptions == nil {

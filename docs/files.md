@@ -29,12 +29,13 @@ the directory is created at the root of the virtual file system.
 
 #### Query-String
 
-| Parameter | Description        |
-| --------- | ------------------ |
-| Type      | `directory`        |
-| Name      | the directory name |
-| Tags      | an array of tags   |
-| CreatedAt | the creation date  |
+| Parameter  | Description                         |
+| ---------- | ----------------------------------- |
+| Type       | `directory`                         |
+| Name       | the directory name                  |
+| Tags       | an array of tags                    |
+| CreatedAt  | the creation date                   |
+| MetadataID | the identifier of a metadata object |
 
 #### HTTP headers
 
@@ -55,8 +56,8 @@ Date: Mon, 19 Sep 2016 12:35:08 GMT
 - 201 Created, when the directory has been successfully created
 - 404 Not Found, when the parent directory does not exist
 - 409 Conflict, when a directory with the same name already exists
-- 422 Unprocessable Entity, when the `Type` or `Name` parameter is missing or
-  invalid
+- 422 Unprocessable Entity, when the `Type`, `Name`, or `MetadataID` parameter
+  is missing or invalid
 
 #### Response
 
@@ -121,6 +122,66 @@ Location: https://cozy.example.com/files/6494e0ac-dfcb-11e5-88c1-472e84a9cbee
 
 **Note**: see [not synchronized directories](not-synchronized-vfs.md) for
 more informations about the `not_synchronized_on` field.
+
+### POST /files/shared-drives
+
+This endpoint returns the information about the Shared Drives directory. If the
+directory does not exist, it is created.
+
+#### Request
+
+```http
+POST /files/shared-drives
+Accept: application/vnd.api+json
+```
+
+#### Response
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/vnd.api+json
+```
+
+```json
+{
+  "data": {
+    "type": "io.cozy.files",
+    "id": "io.cozy.files.shared-drives-dir",
+    "meta": {
+      "rev": "1-e4abdb5a"
+    },
+    "attributes": {
+      "type": "directory",
+      "name": "Drives",
+      "path": "/Drives",
+      "created_at": "2024-03-25T15:22:00Z",
+      "updated_at": "2024-03-25T15:22:00Z",
+      "cozyMetadata": {
+        "doctypeVersion": "1",
+        "metadataVersion": 1,
+        "createdAt": "2024-03-25T15:22:00Z",
+        "createdByApp": "drive",
+        "createdOn": "https://cozy.example.com/",
+        "updatedAt": "2024-03-25T15:22:00Z"
+      }
+    },
+    "relationships": {
+      "parent": {
+        "links": {
+          "related": "/files/io.cozy.files.root-dir"
+        },
+        "data": {
+          "type": "io.cozy.files",
+          "id": "io.cozy.files.root-dir"
+        }
+      }
+    },
+    "links": {
+      "self": "/files/io.cozy.files.shared-drives-dir"
+    }
+  }
+}
+```
 
 ### GET /files/:file-id
 
@@ -310,6 +371,134 @@ Content-Type: application/vnd.api+json
   }
 }
 ```
+
+### POST `/files/_all_docs`
+
+This route allows to fetch several files in one request. It is the same as the
+`_all_docs` request for CouchDB, except the response is in the JSON-API format,
+(with thumbnails and path for the files).
+
+### Request
+
+```http
+POST /files/_all_docs HTTP/1.1
+```
+
+```json
+{
+  "keys": ["e8c1561846c730428180a5f6c6107914", "e8c1561846c730428180a5f6c6109007"]
+}
+```
+
+### Response
+
+```http
+HTTP/1.1 200 OK
+Date: Mon, 27 Sept 2016 12:28:53 GMT
+Content-Length: ...
+Content-Type: application/json
+```
+
+```json
+{
+  "data": [
+    {
+      "type": "io.cozy.files",
+      "id": "e8c1561846c730428180a5f6c6107914",
+      "attributes": {
+        "type": "file",
+        "name": "nicepic1.jpg",
+        "dir_id": "f49b4087cbf946dfc759214394009a6c",
+        "created_at": "2020-02-13T16:35:47.568155477+01:00",
+        "updated_at": "2020-02-13T16:35:47.568155477+01:00",
+        "size": "345385",
+        "md5sum": "12cGYwT+RiNjFxf4f7AmzQ==",
+        "mime": "image/jpeg",
+        "class": "image",
+        "executable": false,
+        "trashed": false,
+        "tags": [],
+        "path": "/Pictures/nicepic1.jpg",
+        "metadata": {
+          "datetime": "2020-02-13T16:35:47.568155477+01:00",
+          "extractor_version": 2,
+          "height": 1080,
+          "width": 1920
+        }
+      },
+      "meta": {
+        "rev": "2-235e715b1d82a93285be1b0bd691b779"
+      },
+      "links": {
+        "self": "/files/e8c1561846c730428180a5f6c6107914",
+        "tiny": "/files/e8c1561846c730428180a5f6c6107914/thumbnails/377327a8e20d6a50/tiny",
+        "small": "/files/e8c1561846c730428180a5f6c6107914/thumbnails/377327a8e20d6a50/small",
+        "medium": "/files/e8c1561846c730428180a5f6c6107914/thumbnails/377327a8e20d6a50/medium",
+        "large": "/files/e8c1561846c730428180a5f6c6107914/thumbnails/377327a8e20d6a50/large"
+      },
+      "relationships": {
+        "parent": {
+          "links": {
+            "related": "/files/f49b4087cbf946dfc759214394009a6c"
+          },
+          "data": {
+            "id": "f49b4087cbf946dfc759214394009a6c",
+            "type": "io.cozy.files"
+          }
+        }
+      }
+    },
+    {
+      "type": "io.cozy.files",
+      "id": "e8c1561846c730428180a5f6c6109007",
+      "attributes": {
+        "type": "file",
+        "name": "nicepic2.jpg",
+        "dir_id": "f49b4087cbf946dfc759214394009a6c",
+        "created_at": "2020-02-13T16:35:47.845049743+01:00",
+        "updated_at": "2020-02-13T16:35:47.845049743+01:00",
+        "size": "323009",
+        "md5sum": "Fla3ucNXuW2Xw/TK8pfsPA==",
+        "mime": "image/jpeg",
+        "class": "image",
+        "executable": false,
+        "trashed": false,
+        "tags": [],
+        "path": "/Pictures/nicepic2.jpg",
+        "metadata": {
+          "datetime": "2020-02-13T16:35:47.845049743+01:00",
+          "extractor_version": 2,
+          "height": 1080,
+          "width": 1920
+        }
+      },
+      "meta": {
+        "rev": "2-4883d6b8ccad32f8fb056af9b7f8b37f"
+      },
+      "links": {
+        "self": "/files/e8c1561846c730428180a5f6c6109007",
+        "tiny": "/files/e8c1561846c730428180a5f6c6109007/thumbnails/58a4aea31b00c99d/tiny",
+        "small": "/files/e8c1561846c730428180a5f6c6109007/thumbnails/58a4aea31b00c99d/small",
+        "medium": "/files/e8c1561846c730428180a5f6c6109007/thumbnails/58a4aea31b00c99d/medium",
+        "large": "/files/e8c1561846c730428180a5f6c6109007/thumbnails/58a4aea31b00c99d/large"
+      },
+      "relationships": {
+        "parent": {
+          "links": {
+            "related": "/files/f49b4087cbf946dfc759214394009a6c"
+          },
+          "data": {
+            "id": "f49b4087cbf946dfc759214394009a6c",
+            "type": "io.cozy.files"
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+
 
 ### GET `/files/_changes`
 
@@ -583,7 +772,7 @@ then the `updated_at` will be set with the value of the `created_at`.
 | Tags                    | an array of tags                                               |
 | Executable              | `true` if the file is executable (UNIX permission)             |
 | Encrypted               | `true` if the file is client-side encrypted                    |
-| Metadata                | a JSON with metadata on this file (_deprecated_)               |
+| Metadata                | a JSON with metadata on this file (_not recommended_)          |
 | MetadataID              | the identifier of a metadata object                            |
 | CreatedAt               | the creation date of the file                                  |
 | UpdatedAt               | the modification date of the file                              |
@@ -621,10 +810,11 @@ Hello world!
 - 412 Precondition Failed, when the md5sum is `Content-MD5` is not equal to
   the md5sum computed by the server
 - 413 Payload Too Large, when there is not enough available space on the cozy
-  to upload the file
+  to upload the file or the file is larger than the server's filesystem maximum
+  file size
 - 422 Unprocessable Entity, when the sent data is invalid (for example, the
-  parent doesn't exist, `Type` or `Name` parameter is missing or invalid,
-  etc.)
+  parent doesn't exist, `Type`, `Name`, or `MetadataID` parameter is missing or
+  invalid, etc.)
 
 #### Response
 
@@ -779,8 +969,9 @@ more informations about the references field.
 
 ### POST /files/upload/metadata
 
-Send a metadata object that can be associated to a file uploaded after that,
-via the `MetadataID` query parameter.
+Send a metadata object that can be associated to a file (or directory) uploaded
+after that, via the `MetadataID` query parameter. The `MetadataID` parameter is
+only valid for 10 minutes, and will expire after that.
 
 **Note:** a special permission on `io.cozy.certified.carbon_copy` is required
 to send a request with `carbonCopy` as key in the `attributes` map. Same for
@@ -842,6 +1033,9 @@ Download the file content.
 By default the `content-disposition` will be `inline`, but it will be
 `attachment` if the query string contains the parameter `Dl=1`
 
+For a PDF file, it's possible to get only a single page by using the `Page`
+parameter in the query-string (1 is the first page).
+
 #### Request
 
 ```http
@@ -866,6 +1060,9 @@ Download the file content from its path.
 By default the `content-disposition` will be `inline`, but it will be
 `attachment` if the query string contains the parameter `Dl=1`
 
+For a PDF file, it's possible to get only a single page by using the `Page`
+parameter in the query-string (1 is the first page).
+
 #### Request
 
 ```http
@@ -889,6 +1086,11 @@ Get an image that shows the first page of a PDF (at most 1080x1920).
 Get a thumbnail of a file (for an image & pdf only). `:format` can be `tiny` (96x96)
 `small` (640x480), `medium` (1280x720), or `large` (1920x1080).
 
+This API does not require authentication because the secret acts as a token.
+This secret is valid for 10 minutes, after which the link will return an error.
+To retrieve a new functional link, you must query the files API again to obtain
+a new secret.
+
 ### PUT /files/:file-id
 
 Overwrite a file
@@ -900,15 +1102,21 @@ The `updated_at` field will be the first value in this list:
 - the `Date` HTTP header
 - the current time from the server.
 
+/!\ If the `updated_at` field is older than the `created_at` one, then the
+`updated_at` will be set with the value of the `created_at`.
+
 #### Query-String
 
-| Parameter  | Description                                        |
-| ---------- | -------------------------------------------------- |
-| Tags       | an array of tags                                   |
-| Executable | `true` if the file is executable (UNIX permission) |
-| Encrypted  | `true` if the file is client-side encrypted        |
-| MetadataID | the identifier of a metadata object                |
-| UpdatedAt  | the modification date of the file                  |
+| Parameter               | Description                                                    |
+| ----------------------- | -------------------------------------------------------------- |
+| Size                    | the file size (when `Content-Length` can't be used)            |
+| Tags                    | an array of tags                                               |
+| Executable              | `true` if the file is executable (UNIX permission)             |
+| Encrypted               | `true` if the file is client-side encrypted                    |
+| MetadataID              | the identifier of a metadata object                            |
+| UpdatedAt               | the modification date of the file                              |
+| SourceAccount           | the id of the source account used by a konnector               |
+| SourceAccountIdentifier | the unique identifier of the account targeted by the connector |
 
 #### HTTP headers
 
@@ -934,6 +1142,11 @@ HELLO WORLD!
 - 404 Not Found, when the file wasn't existing
 - 412 Precondition Failed, when the `If-Match` header is set and doesn't match
   the last revision of the file
+- 413 Payload Too Large, when there is not enough available space on the cozy
+  to upload the file or the file is larger than the server's filesystem maximum
+  file size
+- 422 Unprocessable Entity, when the sent data is invalid (for example, the
+  `MetadataID` parameter has expired)
 
 #### Response
 
@@ -1175,6 +1388,8 @@ Some specific attributes of the patch can be used:
   trash
 - `permanent_delete` boolean to specify that the files needs to be deleted
   (after being trashed)
+- `cozyMetadata.favorite` boolean attribute to put/remove a file from the
+  favorites
 
 #### HTTP headers
 
@@ -1198,7 +1413,10 @@ Content-Type: application/vnd.api+json
       "type": "file",
       "name": "hi.txt",
       "dir_id": "f2f36fec-8018-11e6-abd8-8b3814d9a465",
-      "tags": ["poem"]
+      "tags": ["poem"],
+      "cozyMetadata": {
+        "favorite": true
+      }
     }
   }
 }
@@ -1310,6 +1528,79 @@ Content-Type: application/vnd.api+json
 
 The same status codes can be encountered as the `PATCH /files/:file-id` route.
 
+### POST /files/:id/description
+
+This endpoint fills the `metadata.description` field of a file with a
+description generated by the IA from the content of this file.
+
+#### Request
+
+```http
+POST /files/9152d568-7e7c-11e6-a377-37cbfb190b4b/description HTTP/1.1
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json.vnd+api
+```
+
+```json
+{
+  "data": {
+    "type": "io.cozy.files",
+    "id": "9152d568-7e7c-11e6-a377-37cbfb190b4b",
+    "meta": {
+      "rev": "2-20900ae0"
+    },
+    "attributes": {
+      "type": "file",
+      "name": "hi.txt",
+      "trashed": false,
+      "md5sum": "ODZmYjI2OWQxOTBkMmM4NQo=",
+      "created_at": "2016-09-19T12:38:04Z",
+      "updated_at": "2016-09-19T12:38:04Z",
+      "tags": ["poem"],
+      "size": 12,
+      "executable": false,
+      "class": "document",
+      "mime": "text/plain",
+      "metadata": {
+        "description": "Explores love's complexities through vivid imagery and heartfelt emotions"
+      },
+      "cozyMetadata": {
+        "doctypeVersion": "1",
+        "metadataVersion": 1,
+        "createdAt": "2016-09-20T18:32:49Z",
+        "createdByApp": "drive",
+        "createdOn": "https://cozy.example.com/",
+        "updatedAt": "2016-09-22T13:32:51Z",
+        "uploadedAt": "2016-09-21T04:27:50Z",
+        "uploadedOn": "https://cozy.example.com/",
+        "uploadedBy": {
+          "slug": "drive"
+        }
+      }
+    },
+    "relationships": {
+      "parent": {
+        "links": {
+          "related": "/files/f2f36fec-8018-11e6-abd8-8b3814d9a465"
+        },
+        "data": {
+          "type": "io.cozy.files",
+          "id": "f2f36fec-8018-11e6-abd8-8b3814d9a465"
+        }
+      }
+    },
+    "links": {
+      "self": "/files/9152d568-7e7c-11e6-a377-37cbfb190b4b"
+    }
+  }
+}
+```
+
 ### POST /files/archive
 
 Create an archive. The body of the request lists the files and directories that
@@ -1318,6 +1609,10 @@ sub-directories in the archive.
 
 It's possible to give a file by its id (in the `ids` array) or by its path (in
 the `files` array).
+
+For PDF files, it's possible to put in the archive a single page, with the
+`pages` argument: it's an array of objects, with `id` the file identifier of
+the PDF file, and `page` the page number (1 is the first page).
 
 The generated archive is temporary and is not persisted.
 
@@ -1339,6 +1634,9 @@ Content-Type: application/vnd.api+json
         "/Documents/bills",
         "/Documents/images/sunset.jpg",
         "/Documents/images/eiffel-tower.jpg"
+      ],
+      "pages": [
+        { "id": "3780caf0-104f-013d-3619-18c04daba326", "page": 1 }
       ]
     }
   }

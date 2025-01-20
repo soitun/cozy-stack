@@ -16,13 +16,14 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/couchdb/mango"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/pkg/safehttp"
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 )
 
@@ -63,10 +64,12 @@ func (m *Member) CreateSharingRequest(inst *instance.Instance, s *Sharing, c *Cr
 	for i, m := range s.Members {
 		// Instance and name are private...
 		members[i] = Member{
-			Status:     m.Status,
-			PublicName: m.PublicName,
-			Email:      m.Email,
-			ReadOnly:   m.ReadOnly,
+			Status:       m.Status,
+			PublicName:   m.PublicName,
+			Email:        m.Email,
+			ReadOnly:     m.ReadOnly,
+			OnlyInGroups: m.OnlyInGroups,
+			Groups:       m.Groups,
 		}
 		// ... except for the sharer and the recipient of this request
 		if i == 0 || &s.Credentials[i-1] == c {
@@ -86,6 +89,7 @@ func (m *Member) CreateSharingRequest(inst *instance.Instance, s *Sharing, c *Cr
 			UpdatedAt:   s.UpdatedAt,
 			Rules:       rules,
 			Members:     members,
+			Groups:      s.Groups,
 			NbFiles:     s.countFiles(inst),
 		},
 		nil,
@@ -246,7 +250,7 @@ func (s *Sharing) RegisterCozyURL(inst *instance.Instance, m *Member, cozyURL st
 
 // GenerateOAuthURL takes care of creating a correct OAuth request for
 // the given member of the sharing.
-func (m *Member) GenerateOAuthURL(s *Sharing) (string, error) {
+func (m *Member) GenerateOAuthURL(s *Sharing, shortcut string) (string, error) {
 	if !s.Owner || len(s.Members) != len(s.Credentials)+1 {
 		return "", ErrInvalidSharing
 	}
@@ -267,6 +271,9 @@ func (m *Member) GenerateOAuthURL(s *Sharing) (string, error) {
 	q := url.Values{
 		"sharing_id": {s.SID},
 		"state":      {creds.State},
+	}
+	if shortcut != "" {
+		q.Add("shortcut", shortcut)
 	}
 	u.RawQuery = q.Encode()
 
@@ -371,7 +378,7 @@ func (s *Sharing) SendAnswer(inst *instance.Instance, state string) error {
 	if err != nil {
 		return err
 	}
-	name, err := inst.PublicName()
+	name, err := csettings.PublicName(inst)
 	if err != nil {
 		inst.Logger().WithNamespace("sharing").
 			Infof("No name for instance %v", inst)
@@ -543,7 +550,7 @@ func (s *Sharing) ChangeMemberAddress(inst *instance.Instance, m *Member, params
 		if i == 0 {
 			continue
 		}
-		if s.Members[i] == *m {
+		if m.Same(s.Members[i]) {
 			s.Credentials[i-1].AccessToken.AccessToken = params.AccessToken
 			s.Credentials[i-1].AccessToken.RefreshToken = params.RefreshToken
 		}

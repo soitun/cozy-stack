@@ -81,7 +81,7 @@ owner's instance.
 		if err := json.NewDecoder(res.Body).Decode(&data); err != nil {
 			return err
 		}
-		fmt.Printf("ID: %q\n", data["id"])
+		fmt.Fprintf(os.Stdout, "ID: %q\n", data["id"])
 		return nil
 	},
 }
@@ -90,10 +90,10 @@ var encryptRSACmd = &cobra.Command{
 	Use:   "encrypt-with-rsa <key> <payload",
 	Short: "encrypt a payload in RSA",
 	Long: `
-This command is used by integration tests to encrypt bitwarden organization
-keys. It takes the public or private key of the user and the payload (= the
-organization key) as inputs (both encoded in base64), and print on stdout the
-encrypted data (encoded as base64 too).
+This command is used by system tests to encrypt bitwarden organization keys. It
+takes the public or private key of the user and the payload (= the organization
+key) as inputs (both encoded in base64), and print on stdout the encrypted data
+(encoded as base64 too).
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) != 2 {
@@ -117,7 +117,7 @@ encrypted data (encoded as base64 too).
 		if err != nil {
 			return err
 		}
-		fmt.Printf("4.%s", base64.StdEncoding.EncodeToString(encrypted))
+		fmt.Fprintf(os.Stdout, "4.%s", base64.StdEncoding.EncodeToString(encrypted))
 		return nil
 	},
 }

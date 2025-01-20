@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/bitwarden"
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
-	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/session"
@@ -24,18 +24,28 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func migrateAccountsToCiphers(inst *instance.Instance) error {
-	msg, err := job.NewMessage(map[string]interface{}{
-		"type": "accounts-to-organization",
+// GetConfig is the handler for GET /bitwarden/api/config.
+func GetConfig(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+
+	// The "cipher key encryption" feature was introduced in 2024.2.0, and we
+	// don't support it. So, we need a version number before that.
+	version := "2024.0.0"
+
+	return c.JSON(http.StatusOK, echo.Map{
+		"version": version,
+		"gitHash": nil,
+		"server":  nil,
+		"environment": map[string]interface{}{
+			"cloudRegion":   "EU",
+			"vault":         inst.PageURL("", nil),
+			"api":           inst.PageURL("", nil),
+			"identity":      inst.PageURL("", nil),
+			"notifications": inst.PageURL("", nil),
+		},
+		"featureStates": map[string]interface{}{},
+		"object":        "config",
 	})
-	if err != nil {
-		return err
-	}
-	_, err = job.System().PushJob(inst, &job.JobRequest{
-		WorkerType: "migrations",
-		Message:    msg,
-	})
-	return err
 }
 
 // Prelogin tells to the client how many KDF iterations it must apply when
@@ -167,7 +177,7 @@ func ChangeSecurityStamp(c echo.Context) error {
 		})
 	}
 
-	if err := lifecycle.CheckPassphrase(inst, []byte(data.Hashed)); err != nil {
+	if err := instance.CheckPassphrase(inst, []byte(data.Hashed)); err != nil {
 		return c.JSON(http.StatusUnauthorized, echo.Map{
 			"error": "invalid masterPasswordHash",
 		})
@@ -209,6 +219,24 @@ func GetRevisionDate(c echo.Context) error {
 // sending a hash of the user password. Refresh token is used later to get
 // a new access token by sending the refresh token.
 func GetToken(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	copier := app.Copier(consts.WebappType, inst)
+	_, err := app.GetWebappBySlugAndUpdate(inst, consts.PassSlug, copier, inst.Registries())
+	if err != nil {
+		installer, err := app.NewInstaller(inst, copier,
+			&app.InstallerOptions{
+				Operation:  app.Install,
+				Type:       consts.WebappType,
+				SourceURL:  "registry://" + consts.PassSlug,
+				Slug:       consts.PassSlug,
+				Registries: inst.Registries(),
+			},
+		)
+		if err == nil {
+			_, _ = installer.RunSync()
+		}
+	}
+
 	switch c.FormValue("grant_type") {
 	case "password":
 		return getInitialCredentials(c)
@@ -246,7 +274,7 @@ func getInitialCredentials(c echo.Context) error {
 	pass := []byte(c.FormValue("password"))
 
 	// Authentication
-	if err := lifecycle.CheckPassphrase(inst, pass); err != nil {
+	if err := instance.CheckPassphrase(inst, pass); err != nil {
 		return c.JSON(http.StatusUnauthorized, echo.Map{
 			"error": "invalid password",
 		})
@@ -259,7 +287,7 @@ func getInitialCredentials(c echo.Context) error {
 	}
 
 	// Register the client
-	kind, softwareID := bitwarden.ParseBitwardenDeviceType(c.FormValue("deviceType"))
+	kind := bitwarden.ParseBitwardenDeviceType(c.FormValue("deviceType"))
 	clientName := c.FormValue("clientName")
 	if clientName == "" {
 		clientName = "Bitwarden " + c.FormValue("deviceName")
@@ -268,7 +296,7 @@ func getInitialCredentials(c echo.Context) error {
 		RedirectURIs: []string{"https://cozy.io/"},
 		ClientName:   clientName,
 		ClientKind:   kind,
-		SoftwareID:   softwareID,
+		SoftwareID:   "registry://" + consts.PassSlug,
 	}
 	if err := client.Create(inst, oauth.NotPending); err != nil {
 		return c.JSON(err.Code, err)
@@ -318,7 +346,7 @@ func getInitialCredentials(c echo.Context) error {
 		// This is the first time the bitwarden extension is installed: make sure
 		// the user gets the existing accounts into the vault.
 		// ClientKind is "web" for web apps, e.g. Settings
-		if err := migrateAccountsToCiphers(inst); err != nil {
+		if err := settings.MigrateAccountsToCiphers(inst); err != nil {
 			log.Errorf("Cannot push job for ciphers migration: %s", err)
 		}
 	}
@@ -360,6 +388,16 @@ func checkTwoFactor(c echo.Context, inst *instance.Instance) bool {
 		if token, ok := cache.Get(key); ok {
 			if inst.ValidateTwoFactorPasscode(token, passcode) {
 				return true
+			} else {
+				_ = c.JSON(http.StatusBadRequest, echo.Map{
+					"error":             "invalid_grant",
+					"error_description": "invalid_username_or_password",
+					"ErrorModel": map[string]string{
+						"Message": "Two-step token is invalid. Try again.",
+						"Object":  "error",
+					},
+				})
+				return false
 			}
 		}
 	}
@@ -412,7 +450,7 @@ func refreshToken(c echo.Context) error {
 
 	// Check the refresh token
 	claims, ok := oauth.ValidTokenWithSStamp(inst, consts.RefreshTokenAudience, refresh)
-	if !ok || !bitwarden.IsBitwardenScope(claims.Scope) {
+	if !ok {
 		return c.JSON(http.StatusBadRequest, echo.Map{
 			"error": "invalid refresh token",
 		})
@@ -426,6 +464,11 @@ func refreshToken(c echo.Context) error {
 		}
 		return c.JSON(http.StatusBadRequest, echo.Map{
 			"error": "the client must be registered",
+		})
+	}
+	if !bitwarden.IsBitwardenClient(client, claims.Scope) {
+		return c.JSON(http.StatusBadRequest, echo.Map{
+			"error": "invalid refresh token",
 		})
 	}
 
@@ -496,6 +539,7 @@ func Routes(router *echo.Group) {
 	identity.POST("/accounts/prelogin", Prelogin)
 
 	api := router.Group("/api")
+	api.GET("/config", GetConfig)
 	api.GET("/sync", Sync)
 
 	accounts := api.Group("/accounts")
@@ -518,6 +562,7 @@ func Routes(router *echo.Group) {
 	ciphers.POST("", CreateCipher)
 	ciphers.POST("/create", CreateSharedCipher)
 	ciphers.GET("/:id", GetCipher)
+	ciphers.GET("/:id/details", GetCipher)
 	ciphers.POST("/:id", UpdateCipher)
 	ciphers.PUT("/:id", UpdateCipher)
 	ciphers.POST("/import", ImportCiphers)

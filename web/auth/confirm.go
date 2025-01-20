@@ -58,7 +58,7 @@ func confirmAuth(c echo.Context) error {
 
 	// Check passphrase
 	passphrase := []byte(c.FormValue("passphrase"))
-	if lifecycle.CheckPassphrase(inst, passphrase) != nil {
+	if instance.CheckPassphrase(inst, passphrase) != nil {
 		errorMessage := inst.Translate(CredentialsErrorKey)
 		err := config.GetRateLimiter().CheckRateLimit(inst, limits.AuthType)
 		if limits.IsLimitReachedOrExceeded(err) {
@@ -102,7 +102,7 @@ func ConfirmSuccess(c echo.Context, inst *instance.Instance, state string) error
 	}
 	realtime.GetHub().Publish(inst, realtime.EventCreate, &doc, nil)
 
-	redirect, err := checkRedirectToManager(c)
+	redirect, err := checkRedirectToAuthorized(c)
 	if err != nil {
 		redirect, err = checkRedirectParam(c, inst.DefaultRedirection())
 	}
@@ -127,32 +127,37 @@ func ConfirmSuccess(c echo.Context, inst *instance.Instance, state string) error
 	return c.Redirect(http.StatusSeeOther, redirect.String())
 }
 
-func checkRedirectToManager(c echo.Context) (*url.URL, error) {
+func checkRedirectToAuthorized(c echo.Context) (*url.URL, error) {
 	inst := middlewares.GetInstance(c)
-
-	config, ok := inst.SettingsContext()
-	if !ok {
-		return nil, errors.New("no manager_url")
-	}
-	managerURL, ok := config["manager_url"].(string)
-	if !ok {
-		return nil, errors.New("no manager_url")
-	}
-	manager, err := url.Parse(managerURL)
-	if err != nil {
-		return nil, errors.New("invalid manager_url")
-	}
-
 	redirect := c.FormValue("redirect")
 	u, err := url.Parse(redirect)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, "bad url: could not parse")
 	}
 
-	if u.Scheme != manager.Scheme || u.Host != manager.Host {
-		return nil, errors.New("not a redirection to the manager")
+	if ok := checkRedirectToManager(inst, u); ok {
+		return u, nil
 	}
-	return u, nil
+
+	for _, host := range config.GetConfig().AuthorizedForConfirm {
+		if host == u.Host {
+			return u, nil
+		}
+	}
+
+	return nil, errors.New("not authorized")
+}
+
+func checkRedirectToManager(inst *instance.Instance, redirect *url.URL) bool {
+	managerURL, err := inst.ManagerURL(instance.ManagerBaseURL)
+	if err != nil {
+		return false
+	}
+	manager, err := url.Parse(managerURL)
+	if err != nil {
+		return false
+	}
+	return redirect.Scheme == manager.Scheme && redirect.Host == manager.Host
 }
 
 func confirmCode(c echo.Context) error {

@@ -1,11 +1,13 @@
+// Package config is where the configuration from the configuration files, the
+// command line parameters, and the environment variables is used to fill some
+// structs, and initializes connections (to Swift for example).
 package config
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
-	stdlog "log"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"testing"
 	"text/template"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/limits"
 	"github.com/cozy/cozy-stack/pkg/lock"
 	"github.com/cozy/cozy-stack/pkg/logger"
+	"github.com/cozy/cozy-stack/pkg/pdf"
 	"github.com/cozy/cozy-stack/pkg/tlsclient"
 	"github.com/cozy/cozy-stack/pkg/utils"
 	"github.com/cozy/gomail"
@@ -46,6 +50,8 @@ var Paths = []string{
 	".",
 	".cozy",
 	"$HOME/.cozy",
+	"$HOME/.config/cozy",
+	"$XDG_CONFIG_HOME/cozy",
 	"/etc/cozy",
 }
 
@@ -103,40 +109,43 @@ type Config struct {
 	NoReplyAddr           string
 	NoReplyName           string
 	ReplyTo               string
-	Hooks                 string
 	GeoDB                 string
 	PasswordResetInterval time.Duration
 
-	RemoteAssets map[string]string
+	RemoteAssets         map[string]string
+	DeprecatedApps       DeprecatedAppsCfg
+	AuthorizedForConfirm []string
 
-	Avatars        *avatar.Service
-	Fs             Fs
-	Keyring        keyring.Keyring
-	CouchDB        CouchDB
-	Jobs           Jobs
-	Konnectors     Konnectors
-	Mail           *gomail.DialerOptions
-	MailPerContext map[string]interface{}
-	Move           Move
-	Notifications  Notifications
-	Flagship       Flagship
-	Logger         logger.Options
+	Avatars                *avatar.Service
+	PDF                    *pdf.Service
+	Fs                     Fs
+	Keyring                keyring.Keyring
+	CouchDB                CouchDB
+	Jobs                   Jobs
+	Konnectors             Konnectors
+	Mail                   *gomail.DialerOptions
+	MailPerContext         map[string]interface{}
+	CampaignMail           *gomail.DialerOptions
+	CampaignMailPerContext map[string]interface{}
+	Move                   Move
+	Notifications          Notifications
+	Flagship               Flagship
 
-	Lock                lock.Getter
-	Limiter             *limits.RateLimiter
-	SessionStorage      RedisConfig
-	DownloadStorage     RedisConfig
-	OauthStateStorage   RedisConfig
-	RateLimitingStorage RedisConfig
-	Realtime            RedisConfig
+	Lock              lock.Getter
+	Limiter           *limits.RateLimiter
+	SessionStorage    redis.UniversalClient
+	DownloadStorage   redis.UniversalClient
+	OauthStateStorage redis.UniversalClient
+	Realtime          redis.UniversalClient
 
 	CacheStorage cache.Cache
 
 	Contexts       map[string]interface{}
 	Authentication map[string]interface{}
+	RAGServers     map[string]RAGServer
 	Office         map[string]Office
 	Registries     map[string][]*url.URL
-	Clouderies     map[string]interface{}
+	Clouderies     map[string]ClouderyConfig
 
 	RemoteAllowCustomPort bool
 
@@ -146,6 +155,16 @@ type Config struct {
 
 	AssetsPollingDisabled bool
 	AssetsPollingInterval time.Duration
+}
+
+// ClouderyConfig for [cloudery.ClouderyService].
+type ClouderyConfig struct {
+	API ClouderyAPI `mapstructure:"api"`
+}
+
+type ClouderyAPI struct {
+	URL   string `mapstructure:"url"`
+	Token string `mapstructure:"token"`
 }
 
 // Fs contains the configuration values of the file-system
@@ -183,7 +202,7 @@ type CouchDB struct {
 // Jobs contains the configuration values for the jobs and triggers
 // synchronization
 type Jobs struct {
-	RedisConfig
+	Client                redis.UniversalClient
 	NoWorkers             bool
 	AllowList             bool
 	Workers               []Worker
@@ -211,13 +230,18 @@ type Office struct {
 	OutboxSecret  string
 }
 
+// RAGServer contains the configuration for a RAG server (AI features).
+type RAGServer struct {
+	URL    string
+	APIKey string
+}
+
 // Notifications contains the configuration for the mobile push-notification
 // center, for Android and iOS
 type Notifications struct {
 	Development bool
 
-	AndroidAPIKey string
-	FCMServer     string
+	FCMCredentialsFile string
 
 	IOSCertificateKeyPath  string
 	IOSCertificatePassword string
@@ -232,10 +256,12 @@ type Notifications struct {
 
 // Flagship contains the configuration for the flagship app.
 type Flagship struct {
-	Contexts              map[string]interface{}
-	APKPackageNames       []string
-	APKCertificateDigests []string
-	AppleAppIDs           []string
+	Contexts                      map[string]interface{}
+	APKPackageNames               []string
+	APKCertificateDigests         []string
+	PlayIntegrityDecryptionKeys   []string
+	PlayIntegrityVerificationKeys []string
+	AppleAppIDs                   []string
 }
 
 // SMS contains the configuration to send notifications by SMS.
@@ -243,6 +269,24 @@ type SMS struct {
 	Provider string
 	URL      string
 	Token    string
+}
+
+// DeprecatedAppsCfg describes the config used to setup [github.com/cozy/cozy-stack/web/auth.DeprecatedAppList].
+//
+// XXX: Move this struct next to [github.com/cozy/cozy-stack/web/auth.DeprecatedAppList]
+// once the circling dependency issue is fixed.
+type DeprecatedAppsCfg struct {
+	Apps []DeprecatedApp `mapstructure:"apps"`
+}
+
+// DeprecatedApp describes a list deprecated app and the links used to replace them.
+type DeprecatedApp struct {
+	// SoftwareID found inside the oauth client.
+	SoftwareID string `mapstructure:"software_id"`
+	// Name as printed to the user.
+	Name string `mapstructure:"name"`
+
+	StoreURLs map[string]string `mapstructure:"store_urls"`
 }
 
 // Worker contains the configuration fields for a specific worker type.
@@ -253,66 +297,45 @@ type Worker struct {
 	Timeout      *time.Duration
 }
 
-// RedisConfig contains the configuration values for a redis system
-type RedisConfig struct {
-	cli redis.UniversalClient
-}
-
-// NewRedisConfig creates a redis configuration and its associated client.
-func NewRedisConfig(u string) (conf RedisConfig, err error) {
-	if u == "" {
-		return
-	}
-	opt, err := redis.ParseURL(u)
-	if err != nil {
-		return
-	}
-	conf.cli = redis.NewClient(opt)
-	return
-}
-
-// GetRedisConfig returns a
-func GetRedisConfig(v *viper.Viper, mainOpt *redis.UniversalOptions, key, ptr string) (conf RedisConfig, err error) {
+// GetRedis returns a [redis.UniversalClient] for the given db.
+func GetRedis(v *viper.Viper, mainOpt *redis.UniversalOptions, key, ptr string) (redis.UniversalClient, error) {
 	var localOpt *redis.Options
+	var err error
 
 	localKey := fmt.Sprintf("%s.%s", key, ptr)
-	redisKey := fmt.Sprintf("redis.databases.%s", key)
 
 	if u := v.GetString(localKey); u != "" {
 		localOpt, err = redis.ParseURL(u)
 		if err != nil {
-			err = fmt.Errorf("config: can't parse redis URL(%s): %s", u, err)
-			return
+			return nil, fmt.Errorf("config: can't parse redis URL(%s): %s", u, err)
 		}
+	}
+
+	if mainOpt == nil && localOpt == nil {
+		return nil, nil
 	}
 
 	if mainOpt != nil && localOpt != nil {
-		err = fmt.Errorf("config: ambiguous configuration: the key %q is now "+
-			"deprecated and should be removed in favor of %q",
-			localKey,
-			redisKey)
-		return
+		return nil, fmt.Errorf("config: ambiguous configuration between the cli and the config")
 	}
 
-	if mainOpt != nil {
-		opts := *mainOpt
-		dbNumber := v.GetString(redisKey)
-		if dbNumber == "" {
-			err = fmt.Errorf("config: missing DB number for database %q "+
-				"in the field %q", key, redisKey)
-			return
-		}
-		opts.DB, err = strconv.Atoi(dbNumber)
-		if err != nil {
-			err = fmt.Errorf("config: could not parse key %q: %s", redisKey, err)
-			return
-		}
-		conf.cli = redis.NewUniversalClient(&opts)
-	} else if localOpt != nil {
-		conf.cli = redis.NewClient(localOpt)
+	if localOpt != nil {
+		return redis.NewClient(localOpt), nil
 	}
 
-	return
+	redisKey := fmt.Sprintf("redis.databases.%s", key)
+
+	opts := *mainOpt
+	dbNumber := v.GetString(redisKey)
+	if dbNumber == "" {
+		return nil, fmt.Errorf("config: missing DB number for database %q "+"in the field %q", key, redisKey)
+	}
+	opts.DB, err = strconv.Atoi(dbNumber)
+	if err != nil {
+		return nil, fmt.Errorf("config: could not parse key %q: %s", redisKey, err)
+	}
+
+	return redis.NewUniversalClient(&opts), nil
 }
 
 // FsURL returns a copy of the filesystem URL
@@ -349,11 +372,6 @@ func Lock() lock.Getter {
 	return config.Lock
 }
 
-// Client returns the redis.Client for a RedisConfig
-func (rc *RedisConfig) Client() redis.UniversalClient {
-	return rc.cli
-}
-
 // GetConfig returns the configured instance of Config
 func GetConfig() *Config {
 	return config
@@ -362,6 +380,11 @@ func GetConfig() *Config {
 // Avatars return the configured initials service.
 func Avatars() *avatar.Service {
 	return config.Avatars
+}
+
+// PDF return the configured PDF service.
+func PDF() *pdf.Service {
+	return config.PDF
 }
 
 // GetKeyring returns the configured instance of [keyring.Keyring]
@@ -462,7 +485,7 @@ func Setup(cfgFile string) (err error) {
 		if err := viper.MergeConfig(dest); err != nil {
 			if _, isParseErr := err.(viper.ConfigParseError); isParseErr {
 				log.Errorf("Failed to read cozy-stack configurations from %s", cfgFile)
-				log.Errorf(dest.String())
+				log.Errorf("%s", dest.String())
 				return err
 			}
 		}
@@ -473,6 +496,7 @@ func Setup(cfgFile string) (err error) {
 
 func applyDefaults(v *viper.Viper) {
 	v.SetDefault("password_reset_interval", defaultPasswordResetInterval)
+	v.SetDefault("jobs.ghostscript_cmd", "gs")
 	v.SetDefault("jobs.imagemagick_convert_cmd", "convert")
 	v.SetDefault("jobs.defaultDurationToKeep", "2W")
 	v.SetDefault("assets_polling_disabled", false)
@@ -500,7 +524,13 @@ func max(a, b int) int {
 
 // UseViper sets the configured instance of Config
 func UseViper(v *viper.Viper) error {
-	fsURL, err := url.Parse(v.GetString("fs.url"))
+	fs_url := v.GetString("fs.url")
+	// Allow for plain directory path as fs.url
+	// file:// is the default implicit scheme
+	if strings.HasPrefix(fs_url, "/") {
+		fs_url = "file://" + fs_url
+	}
+	fsURL, err := url.Parse(fs_url)
 	if err != nil {
 		return err
 	}
@@ -530,6 +560,11 @@ func UseViper(v *viper.Viper) error {
 		MaxIdleConnsPerHost:    128,
 		DisableCompression:     true,
 	})
+	if err != nil {
+		return err
+	}
+
+	rag, err := makeRAGServers(v)
 	if err != nil {
 		return err
 	}
@@ -595,41 +630,41 @@ func UseViper(v *viper.Viper) error {
 		}
 	}
 
-	jobsRedis, err := GetRedisConfig(v, redisOptions, "jobs", "url")
+	jobsRedis, err := GetRedis(v, redisOptions, "jobs", "url")
 	if err != nil {
 		return err
 	}
-	lockRedis, err := GetRedisConfig(v, redisOptions, "lock", "url")
+	lockRedis, err := GetRedis(v, redisOptions, "lock", "url")
 	if err != nil {
 		return err
 	}
-	sessionsRedis, err := GetRedisConfig(v, redisOptions, "sessions", "url")
+	sessionsRedis, err := GetRedis(v, redisOptions, "sessions", "url")
 	if err != nil {
 		return err
 	}
-	downloadRedis, err := GetRedisConfig(v, redisOptions, "downloads", "url")
+	downloadRedis, err := GetRedis(v, redisOptions, "downloads", "url")
 	if err != nil {
 		return err
 	}
-	rateLimitingRedis, err := GetRedisConfig(v, redisOptions, "rate_limiting", "url")
+	rateLimitingRedis, err := GetRedis(v, redisOptions, "rate_limiting", "url")
 	if err != nil {
 		return err
 	}
-	oauthStateRedis, err := GetRedisConfig(v, redisOptions, "konnectors", "oauthstate")
+	oauthStateRedis, err := GetRedis(v, redisOptions, "konnectors", "oauthstate")
 	if err != nil {
 		return err
 	}
-	realtimeRedis, err := GetRedisConfig(v, redisOptions, "realtime", "url")
+	realtimeRedis, err := GetRedis(v, redisOptions, "realtime", "url")
 	if err != nil {
 		return err
 	}
-	loggerRedis, err := GetRedisConfig(v, redisOptions, "log", "redis")
+	loggerRedis, err := GetRedis(v, redisOptions, "log", "redis")
 	if err != nil {
 		return err
 	}
 
 	// cache entry is optional
-	cacheRedis, _ := GetRedisConfig(v, redisOptions, "cache", "url")
+	cacheRedis, _ := GetRedis(v, redisOptions, "cache", "url")
 
 	adminSecretFile := v.GetString("admin.secret_filename")
 	if adminSecretFile == "" {
@@ -637,7 +672,7 @@ func UseViper(v *viper.Viper) error {
 	}
 
 	jobs := Jobs{
-		RedisConfig:           jobsRedis,
+		Client:                jobsRedis,
 		ImageMagickConvertCmd: v.GetString("jobs.imagemagick_convert_cmd"),
 		DefaultDurationToKeep: v.GetString("jobs.defaultDurationToKeep"),
 	}
@@ -729,12 +764,9 @@ func UseViper(v *viper.Viper) error {
 		}
 	}
 
-	cacheStorage := cache.New(cacheRedis.Client())
-
-	avatars, err := avatar.NewService(cacheStorage, v.GetString("jobs.imagemagick_convert_cmd"))
-	if err != nil {
-		return fmt.Errorf("failed to create the avatar service: %w", err)
-	}
+	cacheStorage := cache.New(cacheRedis)
+	avatars := avatar.NewService(cacheStorage, v.GetString("jobs.imagemagick_convert_cmd"))
+	pdfService := pdf.NewService(v.GetString("jobs.ghostscript_cmd"))
 
 	// Setup keyring
 	var keyringCfg keyring.Config
@@ -745,6 +777,47 @@ func UseViper(v *viper.Viper) error {
 	keyring, err := keyring.NewFromConfig(keyringCfg)
 	if err != nil {
 		return fmt.Errorf("failed to setup the keyring: %w", err)
+	}
+
+	// Setup default SMTP server
+	mail := &gomail.DialerOptions{
+		Host:                      v.GetString("mail.host"),
+		Port:                      v.GetInt("mail.port"),
+		Username:                  v.GetString("mail.username"),
+		Password:                  v.GetString("mail.password"),
+		NativeTLS:                 v.GetBool("mail.use_ssl"),
+		DisableTLS:                v.GetBool("mail.disable_tls"),
+		SkipCertificateValidation: v.GetBool("mail.skip_certificate_validation"),
+		LocalName:                 v.GetString("mail.local_name"),
+	}
+
+	// Setup campaign mail SMTP server
+	var campaignMail *gomail.DialerOptions
+	if host := v.GetString("campaign_mail.host"); host != "" {
+		viper.SetDefault("campaign_mail.port", 25)
+		viper.SetDefault("campaign_mail.disable_tls", true)
+
+		campaignMail = &gomail.DialerOptions{
+			Host:                      host,
+			Port:                      v.GetInt("campaign_mail.port"),
+			Username:                  v.GetString("campaign_mail.username"),
+			Password:                  v.GetString("campaign_mail.password"),
+			NativeTLS:                 v.GetBool("campaign_mail.use_ssl"),
+			DisableTLS:                v.GetBool("campaign_mail.disable_tls"),
+			SkipCertificateValidation: v.GetBool("campaign_mail.skip_certificate_validation"),
+			LocalName:                 v.GetString("campaign_mail.local_name"),
+		}
+	} else {
+		campaignMail = &gomail.DialerOptions{
+			Host:                      mail.Host,
+			Port:                      mail.Port,
+			Username:                  mail.Username,
+			Password:                  mail.Password,
+			NativeTLS:                 mail.NativeTLS,
+			DisableTLS:                mail.DisableTLS,
+			SkipCertificateValidation: mail.SkipCertificateValidation,
+			LocalName:                 mail.LocalName,
+		}
 	}
 
 	config = &Config{
@@ -762,13 +835,13 @@ func UseViper(v *viper.Viper) error {
 		NoReplyAddr:           v.GetString("mail.noreply_address"),
 		NoReplyName:           v.GetString("mail.noreply_name"),
 		ReplyTo:               v.GetString("mail.reply_to"),
-		Hooks:                 v.GetString("hooks"),
 		GeoDB:                 v.GetString("geodb"),
 		PasswordResetInterval: v.GetDuration("password_reset_interval"),
 
 		RemoteAssets: v.GetStringMapString("remote_assets"),
 
 		Avatars: avatars,
+		PDF:     pdfService,
 		Keyring: keyring,
 		Fs: Fs{
 			URL:                   fsURL,
@@ -787,14 +860,14 @@ func UseViper(v *viper.Viper) error {
 		Konnectors: Konnectors{
 			Cmd: v.GetString("konnectors.cmd"),
 		},
+		RAGServers: rag,
 		Move: Move{
 			URL: v.GetString("move.url"),
 		},
 		Notifications: Notifications{
 			Development: v.GetBool("notifications.development"),
 
-			FCMServer:     v.GetString("notifications.fcm_server"),
-			AndroidAPIKey: v.GetString("notifications.android_api_key"),
+			FCMCredentialsFile: v.GetString("notifications.fcm_credentials_file"),
 
 			IOSCertificateKeyPath:  v.GetString("notifications.ios_certificate_key_path"),
 			IOSCertificatePassword: v.GetString("notifications.ios_certificate_password"),
@@ -807,43 +880,45 @@ func UseViper(v *viper.Viper) error {
 			Contexts: makeSMS(v.GetStringMap("notifications.contexts")),
 		},
 		Flagship: Flagship{
-			Contexts:              v.GetStringMap("flagship.contexts"),
-			APKPackageNames:       v.GetStringSlice("flagship.apk_package_names"),
-			APKCertificateDigests: v.GetStringSlice("flagship.apk_certificate_digests"),
-			AppleAppIDs:           v.GetStringSlice("flagship.apple_app_ids"),
+			Contexts:                      v.GetStringMap("flagship.contexts"),
+			APKPackageNames:               v.GetStringSlice("flagship.apk_package_names"),
+			APKCertificateDigests:         v.GetStringSlice("flagship.apk_certificate_digests"),
+			PlayIntegrityDecryptionKeys:   v.GetStringSlice("flagship.play_integrity_decryption_keys"),
+			PlayIntegrityVerificationKeys: v.GetStringSlice("flagship.play_integrity_verification_keys"),
+			AppleAppIDs:                   v.GetStringSlice("flagship.apple_app_ids"),
 		},
-		Lock:              lock.New(lockRedis.Client()),
-		SessionStorage:    sessionsRedis,
-		DownloadStorage:   downloadRedis,
-		Limiter:           limits.NewRateLimiter(rateLimitingRedis.Client()),
-		OauthStateStorage: oauthStateRedis,
-		Realtime:          realtimeRedis,
-		CacheStorage:      cacheStorage,
-		Logger: logger.Options{
-			Level:  v.GetString("log.level"),
-			Syslog: v.GetBool("log.syslog"),
-			Redis:  loggerRedis.Client(),
-		},
-		Mail: &gomail.DialerOptions{
-			Host:                      v.GetString("mail.host"),
-			Port:                      v.GetInt("mail.port"),
-			Username:                  v.GetString("mail.username"),
-			Password:                  v.GetString("mail.password"),
-			DisableTLS:                v.GetBool("mail.disable_tls"),
-			SkipCertificateValidation: v.GetBool("mail.skip_certificate_validation"),
-		},
-		MailPerContext: v.GetStringMap("mail.contexts"),
-		Contexts:       v.GetStringMap("contexts"),
-		Authentication: v.GetStringMap("authentication"),
-		Office:         office,
-		Registries:     regs,
-		Clouderies:     v.GetStringMap("clouderies"),
+		Lock:                   lock.New(lockRedis),
+		SessionStorage:         sessionsRedis,
+		DownloadStorage:        downloadRedis,
+		Limiter:                limits.NewRateLimiter(rateLimitingRedis),
+		OauthStateStorage:      oauthStateRedis,
+		Realtime:               realtimeRedis,
+		CacheStorage:           cacheStorage,
+		Mail:                   mail,
+		MailPerContext:         v.GetStringMap("mail.contexts"),
+		CampaignMail:           campaignMail,
+		CampaignMailPerContext: v.GetStringMap("campaign_mail.contexts"),
+		Contexts:               v.GetStringMap("contexts"),
+		Authentication:         v.GetStringMap("authentication"),
+		Office:                 office,
+		Registries:             regs,
+		AuthorizedForConfirm:   v.GetStringSlice("authorized_hosts_for_confirm_auth"),
 
 		CSPAllowList:  cspAllowList,
 		CSPPerContext: cspPerContext,
 
 		AssetsPollingDisabled: v.GetBool("assets_polling_disabled"),
 		AssetsPollingInterval: v.GetDuration("assets_polling_interval"),
+	}
+
+	err = v.UnmarshalKey("deprecated_apps", &config.DeprecatedApps)
+	if err != nil {
+		return fmt.Errorf(`failed to parse the config for "deprecated_apps": %w`, err)
+	}
+
+	err = v.UnmarshalKey("clouderies", &config.Clouderies)
+	if err != nil {
+		return fmt.Errorf(`failed to parse the config for "clouderies": %w`, err)
 	}
 
 	// For compatibility
@@ -859,22 +934,27 @@ func UseViper(v *viper.Viper) error {
 		config.RemoteAllowCustomPort = true
 	}
 
-	if err = logger.Init(config.Logger); err != nil {
+	loggerOpts := logger.Options{
+		Level: v.GetString("log.level"),
+		Redis: loggerRedis,
+	}
+
+	if v.GetBool("log.syslog") {
+		syslogHook, err := logger.SyslogHook()
+		if err != nil {
+			return fmt.Errorf("failed to setup the syslog hook: %w", err)
+		}
+
+		// Redirect all the logs to the syslog hook and don't log to STDIO
+		loggerOpts.Hooks = append(loggerOpts.Hooks, syslogHook)
+		loggerOpts.Output = io.Discard
+	}
+
+	if err = logger.Init(loggerOpts); err != nil {
 		return err
 	}
 
-	w := logger.WithNamespace("go-redis").Writer()
-	l := stdlog.New(w, "", 0)
-	redis.SetLogger(&contextPrint{l})
 	return nil
-}
-
-type contextPrint struct {
-	l *stdlog.Logger
-}
-
-func (c contextPrint) Printf(ctx context.Context, format string, args ...interface{}) {
-	c.l.Printf(format, args...)
 }
 
 func makeCouch(v *viper.Viper) (CouchDB, error) {
@@ -935,6 +1015,25 @@ func makeCouch(v *viper.Viper) (CouchDB, error) {
 		couch.Clusters = []CouchDBCluster{couch.Global}
 	}
 	return couch, nil
+}
+
+func makeRAGServers(v *viper.Viper) (map[string]RAGServer, error) {
+	servers := make(map[string]RAGServer)
+	for k, v := range v.GetStringMap("rag") {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf(
+				"Bad format in the rag section of the configuration file: "+
+					"should be a map, got %#v", v)
+		}
+		url, _ := m["url"].(string)
+		key, _ := m["api_key"].(string)
+		servers[k] = RAGServer{
+			URL:    url,
+			APIKey: key,
+		}
+	}
+	return servers, nil
 }
 
 func makeRegistries(v *viper.Viper) (map[string][]*url.URL, error) {
@@ -1051,6 +1150,7 @@ func createTestViper() *viper.Viper {
 	v.SetDefault("log.level", "info")
 	v.SetDefault("assets_polling_disabled", false)
 	v.SetDefault("assets_polling_interval", 2*time.Minute)
+	v.SetDefault("contexts", map[string]interface{}{DefaultInstanceContext: map[string]interface{}{}})
 	applyDefaults(v)
 	return v
 }
@@ -1058,7 +1158,9 @@ func createTestViper() *viper.Viper {
 // UseTestFile can be used in a test file to inject a configuration
 // from a cozy.test.* file. If it can not find this file in your
 // $HOME/.cozy directory it will use the default one.
-func UseTestFile() {
+func UseTestFile(t *testing.T) {
+	t.Helper()
+
 	build.BuildMode = build.ModeProd
 	v := createTestViper()
 
@@ -1066,12 +1168,12 @@ func UseTestFile() {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			v = createTestViper()
 		} else {
-			panic(fmt.Errorf("fatal error test config file: %s", err))
+			t.Fatalf("fatal error test config file: %s", err)
 		}
 	}
 
 	if err := UseViper(v); err != nil {
-		panic(fmt.Errorf("fatal error test config file: %s", err))
+		t.Fatalf("fatal error test config file: %s", err)
 	}
 }
 

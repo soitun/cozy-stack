@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/job"
+	"github.com/cozy/cozy-stack/model/notification/center"
+	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -37,6 +42,12 @@ func (s *Sharing) SendInvitations(inst *instance.Instance, perms *permission.Per
 		}
 		state := s.Credentials[i-1].State
 		g.Go(func() error {
+			defer func() {
+				if r := recover(); r != nil {
+					inst.Logger().Errorf("[panic] %v: %s", r, debug.Stack())
+				}
+			}()
+
 			link := m.InvitationLink(inst, s, state, perms)
 			if m.Instance != "" && canSendShortcut {
 				if err := m.SendShortcut(inst, s, link); err == nil {
@@ -45,6 +56,9 @@ func (s *Sharing) SendInvitations(inst *instance.Instance, perms *permission.Per
 				}
 			}
 			if m.Email == "" {
+				if len(m.Groups) > 0 {
+					return nil
+				}
 				return ErrInvitationNotSent
 			}
 			if err := m.SendMail(inst, s, sharer, desc, link); err != nil {
@@ -74,17 +88,13 @@ func (s *Sharing) SendInvitationsToMembers(inst *instance.Instance, members []Me
 		if key == "" {
 			key = m.Instance
 		}
-		sent := false
-		link := m.InvitationLink(inst, s, states[key], nil)
-		if m.Instance != "" {
-			if err := m.SendShortcut(inst, s, link); err != nil {
-				sent = true
-			}
-		}
-		if !sent {
+		// If an instance URL is available, the owner's Cozy has already
+		// created a shortcut, so we don't need to send an invitation.
+		if m.Instance == "" {
 			if m.Email == "" {
 				return ErrInvitationNotSent
 			}
+			link := m.InvitationLink(inst, s, states[key], nil)
 			if err := m.SendMail(inst, s, sharer, desc, link); err != nil {
 				inst.Logger().WithNamespace("sharing").
 					Errorf("Can't send email for %#v: %s", m.Email, err)
@@ -130,7 +140,7 @@ func (s *Sharing) SendInvitationsToMembers(inst *instance.Instance, members []Me
 }
 
 func (s *Sharing) getSharerAndDescription(inst *instance.Instance) (string, string) {
-	sharer, _ := inst.PublicName()
+	sharer, _ := csettings.PublicName(inst)
 	if sharer == "" {
 		sharer = inst.Translate("Sharing Empty name")
 	}
@@ -182,12 +192,14 @@ func (m *Member) SendMail(inst *instance.Instance, s *Sharing, sharer, descripti
 	} else {
 		action = inst.Translate("Mail Sharing Request Action Write")
 	}
+	titleType := getDocumentTitleType(inst, s)
 	docType := getDocumentType(inst, s)
 	mailValues := map[string]interface{}{
 		"SharerPublicName": sharer,
 		"SharerEmail":      sharerMail,
 		"Action":           action,
 		"Description":      description,
+		"TitleType":        titleType,
 		"DocType":          docType,
 		"SharingLink":      link,
 	}
@@ -209,6 +221,24 @@ func (m *Member) SendMail(inst *instance.Instance, s *Sharing, sharer, descripti
 	return err
 }
 
+func getDocumentTitleType(inst *instance.Instance, s *Sharing) string {
+	rule := s.FirstFilesRule()
+	if rule == nil {
+		if len(s.Rules) > 0 && s.Rules[0].DocType == consts.BitwardenOrganizations {
+			return inst.Translate("Notification Sharing Title Organization")
+		}
+		return inst.Translate("Notification Sharing Title Document")
+	}
+	_, err := inst.VFS().FileByID(rule.Values[0])
+	if err != nil {
+		return inst.Translate("Notification Sharing Title Directory")
+	}
+	if strings.HasSuffix(s.Description, ".cozy-note") {
+		return inst.Translate("Notification Sharing Title Note")
+	}
+	return inst.Translate("Notification Sharing Title File")
+}
+
 func getDocumentType(inst *instance.Instance, s *Sharing) string {
 	rule := s.FirstFilesRule()
 	if rule == nil {
@@ -220,6 +250,9 @@ func getDocumentType(inst *instance.Instance, s *Sharing) string {
 	_, err := inst.VFS().FileByID(rule.Values[0])
 	if err != nil {
 		return inst.Translate("Notification Sharing Type Directory")
+	}
+	if strings.HasSuffix(s.Description, ".cozy-note") {
+		return inst.Translate("Notification Sharing Type Note")
 	}
 	return inst.Translate("Notification Sharing Type File")
 }
@@ -299,7 +332,7 @@ func (s *Sharing) CreateShortcut(inst *instance.Instance, previewURL string, see
 		inst.Logger().Warnf("Cannot save shortcut id %s: %s", s.ShortcutID, err)
 	}
 
-	return s.SendShortcutMail(inst, fileDoc, previewURL)
+	return s.SendShortcutNotification(inst, fileDoc, previewURL)
 }
 
 // SendShortcut sends the HTTP request to the cozy of the recipient for adding
@@ -322,23 +355,70 @@ func (m *Member) SendShortcut(inst *instance.Instance, s *Sharing, link string) 
 	return m.CreateSharingRequest(inst, s, creds, u)
 }
 
-// SendShortcutMail will send a notification mail after a shortcut for a
-// sharing has been created.
-func (s *Sharing) SendShortcutMail(inst *instance.Instance, fileDoc *vfs.FileDoc, previewURL string) error {
+func (s *Sharing) SendShortcutNotification(inst *instance.Instance, fileDoc *vfs.FileDoc, previewURL string) error {
 	sharerName := s.Members[0].PublicName
 	if sharerName == "" {
 		sharerName = inst.Translate("Sharing Empty name")
 	}
+	if err := s.SendShortcutPush(inst, fileDoc, sharerName); err != nil {
+		inst.Logger().WithNamespace("sharing").
+			Warnf("Cannot send push notification: %s", err)
+	}
+	return s.SendShortcutMail(inst, fileDoc, previewURL, sharerName)
+}
+
+func (s *Sharing) SendShortcutPush(inst *instance.Instance, fileDoc *vfs.FileDoc, sharerName string) error {
+	notifiables, err := oauth.GetNotifiables(inst)
+	if err != nil {
+		return err
+	}
+	hasFlagship := false
+	for _, notifiable := range notifiables {
+		if notifiable.Flagship {
+			hasFlagship = true
+		}
+	}
+	if !hasFlagship {
+		return nil
+	}
+
+	targetType := getTargetTitleType(inst, fileDoc.Metadata)
+	title := inst.Translate("Push Sharing Shortcut Title")
+	message := inst.Translate("Push Sharing Shortcut Message", sharerName, targetType)
+	push := center.PushMessage{
+		NotificationID: fileDoc.ID(),
+		Title:          title,
+		Message:        message,
+		Data: map[string]interface{}{
+			"redirectLink": "drive/#/sharings",
+		},
+	}
+	msg, err := job.NewMessage(&push)
+	if err != nil {
+		return err
+	}
+	_, err = job.System().PushJob(inst, &job.JobRequest{
+		WorkerType: "push",
+		Message:    msg,
+	})
+	return err
+}
+
+// SendShortcutMail will send a notification mail after a shortcut for a
+// sharing has been created.
+func (s *Sharing) SendShortcutMail(inst *instance.Instance, fileDoc *vfs.FileDoc, previewURL, sharerName string) error {
 	var action string
 	if s.ReadOnlyRules() {
 		action = inst.Translate("Mail Sharing Request Action Read")
 	} else {
 		action = inst.Translate("Mail Sharing Request Action Write")
 	}
+	titleType := getTargetTitleType(inst, fileDoc.Metadata)
 	targetType := getTargetType(inst, fileDoc.Metadata)
 	mailValues := map[string]interface{}{
 		"SharerPublicName": sharerName,
 		"Action":           action,
+		"TitleType":        titleType,
 		"TargetType":       targetType,
 		"TargetName":       s.Description,
 		"SharingLink":      previewURL,
@@ -359,10 +439,27 @@ func (s *Sharing) SendShortcutMail(inst *instance.Instance, fileDoc *vfs.FileDoc
 	return err
 }
 
+func getTargetTitleType(inst *instance.Instance, metadata map[string]interface{}) string {
+	target, _ := metadata["target"].(map[string]interface{})
+	if target["_type"] != consts.Files {
+		return inst.Translate("Notification Sharing Title Document")
+	}
+	if target["mime"] == consts.NoteMimeType {
+		return inst.Translate("Notification Sharing Title Note")
+	}
+	if target["mime"] == nil || target["mime"] == "" {
+		return inst.Translate("Notification Sharing Title Directory")
+	}
+	return inst.Translate("Notification Sharing Title File")
+}
+
 func getTargetType(inst *instance.Instance, metadata map[string]interface{}) string {
 	target, _ := metadata["target"].(map[string]interface{})
 	if target["_type"] != consts.Files {
 		return inst.Translate("Notification Sharing Type Document")
+	}
+	if target["mime"] == consts.NoteMimeType {
+		return inst.Translate("Notification Sharing Type Note")
 	}
 	if target["mime"] == nil || target["mime"] == "" {
 		return inst.Translate("Notification Sharing Type Directory")

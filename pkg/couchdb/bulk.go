@@ -20,14 +20,12 @@ import (
 
 // AllDocsRequest is used to build a _all_docs request
 type AllDocsRequest struct {
-	Descending    bool     `url:"descending,omitempty"`
-	Limit         int      `url:"limit,omitempty"`
-	Skip          int      `url:"skip,omitempty"`
-	StartKey      string   `url:"startkey,omitempty"`
-	StartKeyDocID string   `url:"startkey_docid,omitempty"`
-	EndKey        string   `url:"endkey,omitempty"`
-	EndKeyDocID   string   `url:"endkey_docid,omitempty"`
-	Keys          []string `url:"keys,omitempty"`
+	Descending bool     `url:"descending,omitempty"`
+	Limit      int      `url:"limit,omitempty"`
+	Skip       int      `url:"skip,omitempty"`
+	StartKey   string   `url:"startkey,omitempty"`
+	EndKey     string   `url:"endkey,omitempty"`
+	Keys       []string `url:"keys,omitempty"`
 }
 
 // AllDocsResponse is the response we receive from an _all_docs request
@@ -208,9 +206,9 @@ func ForeachDocsWithCustomPagination(db prefixer.Prefixer, doctype string, limit
 			skip = 1
 		}
 		req := &AllDocsRequest{
-			StartKeyDocID: startKey,
-			Skip:          skip,
-			Limit:         limit,
+			StartKey: `"` + startKey + `"`,
+			Skip:     skip,
+			Limit:    limit,
 		}
 		v, err := query.Values(req)
 		if err != nil {
@@ -280,7 +278,7 @@ func BulkUpdateDocs(db prefixer.Prefixer, doctype string, docs, olddocs []interf
 		if len(remaining) < n {
 			n = len(remaining)
 		}
-		bulkDocs := docs[:n]
+		bulkDocs := remaining[:n]
 		remaining = remaining[n:]
 		bulkOlds := olds[:n]
 		olds = olds[n:]
@@ -313,7 +311,7 @@ func bulkUpdateDocs(db prefixer.Prefixer, doctype string, docs, olddocs []interf
 	if len(res) != len(docs) {
 		return errors.New("BulkUpdateDoc receive an unexpected number of responses")
 	}
-	logBulk(db, "BulkDeleteDocs", doctype, res)
+	logBulk(db, "BulkUpdateDocs", doctype, res)
 	for i, doc := range docs {
 		if d, ok := doc.(Doc); ok {
 			update := res[i]
@@ -403,7 +401,7 @@ func logBulk(db prefixer.Prefixer, prefix, doctype string, docs interface{}) {
 	} else if maps, ok := docs.([]map[string]interface{}); ok {
 		for _, doc := range maps {
 			id, _ := doc["_id"].(string)
-			extracted = append(extracted, fmt.Sprintf("%s", id))
+			extracted = append(extracted, id)
 		}
 	}
 

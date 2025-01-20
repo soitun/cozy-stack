@@ -6,10 +6,12 @@ import (
 
 	"github.com/cozy/cozy-stack/model/account"
 	"github.com/cozy/cozy-stack/model/instance"
+	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/metadata"
+	"github.com/gofrs/uuid/v5"
 )
 
 // DocTypeVersion represents the doctype version. Each time this document
@@ -37,6 +39,8 @@ type Settings struct {
 	GlobalEquivalentDomains []int                  `json:"global_equivalent_domains,omitempty"`
 	Metadata                *metadata.CozyMetadata `json:"cozyMetadata,omitempty"`
 	ExtensionInstalled      bool                   `json:"extension_installed,omitempty"`
+	EncryptionTipDismissed  bool                   `json:"tooltip_explain_encryption_dismissed,omitempty"`
+	AutofillTipDismissed    bool                   `json:"autofill_tooltip_dismissed,omitempty"`
 }
 
 // ID returns the settings qualified identifier
@@ -103,16 +107,18 @@ func (s *Settings) EnsureCozyOrganization(inst *instance.Instance) error {
 		}
 	}
 	if s.OrganizationID == "" {
-		s.OrganizationID, err = couchdb.UUID(inst)
+		uid, err := uuid.NewV7()
 		if err != nil {
 			return err
 		}
+		s.OrganizationID = uid.String()
 	}
 	if s.CollectionID == "" {
-		s.CollectionID, err = couchdb.UUID(inst)
+		uid, err := uuid.NewV7()
 		if err != nil {
 			return err
 		}
+		s.CollectionID = uid.String()
 	}
 	return nil
 }
@@ -167,6 +173,22 @@ func UpdateRevisionDate(inst *instance.Instance, settings *Settings) error {
 		inst.Logger().WithNamespace("bitwarden").
 			Infof("Cannot update revision date: %s", err)
 	}
+	return err
+}
+
+// MigrateAccountsToCiphers creates a job to copy the konnectors accounts
+// inside the bitwarden vault (and set the extension_installed flag).
+func MigrateAccountsToCiphers(inst *instance.Instance) error {
+	msg, err := job.NewMessage(map[string]interface{}{
+		"type": "accounts-to-organization",
+	})
+	if err != nil {
+		return err
+	}
+	_, err = job.System().PushJob(inst, &job.JobRequest{
+		WorkerType: "migrations",
+		Message:    msg,
+	})
 	return err
 }
 

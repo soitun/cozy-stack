@@ -144,6 +144,9 @@ creates a zip archive from files in the VFS. The options are:
 - `dir_id`: the directory identifier where the zip archive will be put
 - `filename`: the name of the zip archive.
 
+**Note:** it is possible to include only a page for a PDF file, by using an
+object with `id` and `page` instead of just the file identifier.
+
 ### Example
 
 ```json
@@ -153,7 +156,9 @@ creates a zip archive from files in the VFS. The options are:
         "selection/two.pdf": "36eb54c8-90fe-11e9-aeca-03ddc3acf91c",
         "selection/three.pdf": "37284586-90fe-11e9-be6d-179f72076e43",
         "selection/four.pdf": "37655462-90fe-11e9-9059-8739e3746720",
-        "selection/five.pdf": "379fedfc-90fe-11e9-849f-0bbe172eba5f"
+        "selection/five.pdf": "379fedfc-90fe-11e9-849f-0bbe172eba5f",
+        "selection/front.pdf": { "id": "49ca9e50-1074-013d-361a-18c04daba326", "page": 1 },
+        "selection/back.pdf":  { "id": "49ca9e50-1074-013d-361a-18c04daba326", "page": 2 }
     },
     "dir_id": "3657ce9c-90fe-11e9-b40b-33baf841bcb8",
     "filename": "selection.zip"
@@ -190,9 +195,15 @@ file at the root of this repository.
 
 -   `mode`: string specifying the mode of the send:
     -   `noreply` to send a notification mail to the user
+    -   `pending` to send a mail to the user to confirm their new email address
     -   `from` to send a mail from the user
     -   `support` to send both an email to the support and a confirmation to
         the user
+    -   `campaign` to send a non transactional email to the user via an SMTP
+        server using the following configurations, in order of priority:
+        1. `campaign_mail.contexts.<context name>` if defined
+        2. `campaign_mail` otherwise
+        3. `mail` as the final fallback
 -   `to`: list of object `{name, email}` representing the addresses of the
     recipients. (should not be used in `noreply` mode)
 -   `subject`: string specifying the subject of the mail
@@ -337,11 +348,18 @@ in the config file, via the `fs.auto_clean_trashed_after` parameter.
 
 ## share workers
 
-The stack have 3 workers to power the sharings (internal usage only):
+The stack have 4 workers to power the sharings (internal usage only):
 
-1. `share-track`, to update the `io.cozy.shared` database
-2. `share-replicate`, to start a replicator for most documents
-3. `share-upload`, to upload files
+1. `share-group`, to add/remove members to a sharing
+2. `share-track`, to update the `io.cozy.shared` database
+3. `share-replicate`, to start a replicator for most documents
+4. `share-upload`, to upload files
+
+### Share-group
+
+When a contact is added to or removed from a group, the change should be
+reflected in the group's sharings' recipients. The message is composed of the
+contact ID, the list of groups added and the list of groups removed.
 
 ### Share-track
 
@@ -395,9 +413,8 @@ It can be launched from command-line with:
 $ cozy-stack jobs run migrations --domain example.mycozy.cloud --json '{"type": "to-swift-v3"}'
 ```
 
-## Deprecated workers
+## index
 
-### updates
-
-The `updates` worker was used for updating applications when there were no
-auto-update mechanism.
+This worker is used for sending data to a RAG. It looks at the changes feed for
+the given doctype, send the changes to an external indexer that will generate
+embeddings for the data and put them in a vector database.

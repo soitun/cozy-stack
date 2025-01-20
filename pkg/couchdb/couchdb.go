@@ -19,7 +19,6 @@ import (
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/realtime"
 	"github.com/labstack/echo/v4"
-	"github.com/sirupsen/logrus"
 )
 
 // MaxString is the unicode character "\uFFFF", useful in query as
@@ -312,7 +311,11 @@ func makeRequest(db prefixer.Prefixer, doctype, method, path string, reqbody int
 		log.Error(err.Error())
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Flush the body, so that the connection can be reused by keep-alive
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if elapsed.Seconds() >= 10 {
 		log.Infof("slow request on %s %s (%s)", method, path, elapsed)
@@ -323,8 +326,6 @@ func makeRequest(db prefixer.Prefixer, doctype, method, path string, reqbody int
 		return err
 	}
 	if resbody == nil {
-		// Flush the body, so that the connecion can be reused by keep-alive
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 
@@ -348,15 +349,6 @@ func Compact(db prefixer.Prefixer, doctype string) error {
 	// CouchDB requires a Content-Type: application/json header
 	body := map[string]interface{}{}
 	return makeRequest(db, doctype, http.MethodPost, "_compact", body, nil)
-}
-
-// UUID requests a Universally Unique Identifier (UUID) from CouchDB.
-func UUID(db prefixer.Prefixer) (string, error) {
-	var out UUIDResponse
-	if err := makeRequest(db, "", http.MethodGet, "_uuids", nil, &out); err != nil {
-		return "", err
-	}
-	return out.UUIDs[0], nil
 }
 
 // DBStatus responds with informations on the database: size, number of
@@ -531,7 +523,7 @@ func DeleteDoc(db prefixer.Prefixer, doc Doc) error {
 	// metric.
 	if doc.DocType() == consts.Accounts {
 		logger.WithDomain(db.DomainName()).
-			WithFields(logrus.Fields{
+			WithFields(logger.Fields{
 				"log_id":      "account_delete",
 				"account_id":  doc.ID(),
 				"account_rev": doc.Rev(),
@@ -572,8 +564,14 @@ func UpdateDoc(db prefixer.Prefixer, doc Doc) error {
 		return err
 	}
 	doctype := doc.DocType()
-	if id == "" || doc.Rev() == "" || doctype == "" {
-		return fmt.Errorf("UpdateDoc doc argument should have doctype, id and rev")
+	if doctype == "" {
+		return fmt.Errorf("UpdateDoc: doctype is missing")
+	}
+	if id == "" {
+		return fmt.Errorf("UpdateDoc: id is missing")
+	}
+	if doc.Rev() == "" {
+		return fmt.Errorf("UpdateDoc: rev is missing")
 	}
 
 	url := url.PathEscape(id)
@@ -602,8 +600,14 @@ func UpdateDocWithOld(db prefixer.Prefixer, doc, oldDoc Doc) error {
 		return err
 	}
 	doctype := doc.DocType()
-	if id == "" || doc.Rev() == "" || doctype == "" {
-		return fmt.Errorf("UpdateDoc doc argument should have doctype, id and rev")
+	if doctype == "" {
+		return fmt.Errorf("UpdateDocWithOld: doctype is missing")
+	}
+	if id == "" {
+		return fmt.Errorf("UpdateDocWithOld: id is missing")
+	}
+	if doc.Rev() == "" {
+		return fmt.Errorf("UpdateDocWithOld: rev is missing")
 	}
 
 	url := url.PathEscape(id)
@@ -627,9 +631,16 @@ func CreateNamedDoc(db prefixer.Prefixer, doc Doc) error {
 		return err
 	}
 	doctype := doc.DocType()
-	if doc.Rev() != "" || id == "" || doctype == "" {
-		return fmt.Errorf("CreateNamedDoc should have type and id but no rev")
+	if doctype == "" {
+		return fmt.Errorf("CreateNamedDoc: doctype is missing")
 	}
+	if id == "" {
+		return fmt.Errorf("CreateNamedDoc: id is missing")
+	}
+	if doc.Rev() != "" {
+		return fmt.Errorf("CreateNamedDoc: no rev should be given")
+	}
+
 	var res UpdateResponse
 	err = makeRequest(db, doctype, http.MethodPut, url.PathEscape(id), doc, &res)
 	if err != nil {
@@ -916,11 +927,6 @@ type ViewResponse struct {
 	Total  int                `json:"total_rows"`
 	Offset int                `json:"offset,omitempty"`
 	Rows   []*ViewResponseRow `json:"rows"`
-}
-
-// UUIDResponse is the response from _uuids
-type UUIDResponse struct {
-	UUIDs []string `json:"uuids"`
 }
 
 // DBStatusResponse is the response from DBStatus

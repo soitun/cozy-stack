@@ -37,7 +37,7 @@ func (i *apiInstance) MarshalJSON() ([]byte, error) {
 	return json.Marshal(i.doc)
 }
 
-func getInstance(c echo.Context) error {
+func (h *HTTPHandler) getInstance(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	doc, err := inst.SettingsDocument()
@@ -47,6 +47,9 @@ func getInstance(c echo.Context) error {
 
 	doc.M["locale"] = inst.Locale
 	doc.M["onboarding_finished"] = inst.OnboardingFinished
+	if inst.PasswordDefined != nil {
+		doc.M["password_defined"] = *inst.PasswordDefined
+	}
 	doc.M["auto_update"] = !inst.NoAutoUpdate
 	doc.M["auth_mode"] = instance.AuthModeToString(inst.AuthMode)
 	doc.M["tos"] = inst.TOSSigned
@@ -54,26 +57,42 @@ func getInstance(c echo.Context) error {
 	doc.M["uuid"] = inst.UUID
 	doc.M["oidc_id"] = inst.OIDCID
 	doc.M["context"] = inst.ContextName
+	if len(inst.Sponsorships) > 0 {
+		doc.M["sponsorships"] = inst.Sponsorships
+	}
 	// XXX we had a bug where the default_redirection was filled by a full URL
 	// instead of slug+path, and we fix it when this endpoint is called.
 	if value, ok := doc.M["default_redirection"].(string); !ok || strings.HasPrefix(value, "http") {
 		doc.M["default_redirection"] = inst.DefaultAppAndPath()
 	}
 
-	if err = middlewares.Allow(c, permission.GET, doc); err != nil {
+	// Allow any application with a token
+	if _, err = middlewares.GetPermission(c); err != nil {
 		return err
+	}
+
+	url, err := h.svc.GetLegalNoticeUrl(inst)
+	if err != nil {
+		return err
+	}
+	if url != "" {
+		doc.M["legal_notice_url"] = url
 	}
 
 	return jsonapi.Data(c, http.StatusOK, &apiInstance{doc}, nil)
 }
 
-func updateInstance(c echo.Context) error {
+func (h *HTTPHandler) updateInstance(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	doc := &couchdb.JSONDoc{}
 	obj, err := jsonapi.Bind(c.Request().Body, doc)
 	if err != nil {
 		return err
+	}
+
+	if doc.M == nil {
+		return jsonapi.BadJSON()
 	}
 
 	doc.Type = consts.Settings
@@ -91,6 +110,7 @@ func updateInstance(c echo.Context) error {
 		delete(doc.M, "tos_latest")
 		delete(doc.M, "uuid")
 		delete(doc.M, "context")
+		delete(doc.M, "sponsorships")
 		delete(doc.M, "oidc_id")
 	}
 
@@ -111,7 +131,7 @@ func updateInstance(c echo.Context) error {
 	return jsonapi.Data(c, http.StatusOK, &apiInstance{doc}, nil)
 }
 
-func updateInstanceTOS(c echo.Context) error {
+func (h *HTTPHandler) updateInstanceTOS(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	// Allow any request from OAuth tokens to use this route
@@ -130,7 +150,7 @@ func updateInstanceTOS(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func updateInstanceAuthMode(c echo.Context) error {
+func (h *HTTPHandler) updateInstanceAuthMode(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 
 	if err := middlewares.AllowWholeType(c, permission.PUT, consts.Settings); err != nil {
@@ -175,7 +195,7 @@ func updateInstanceAuthMode(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func askInstanceDeletion(c echo.Context) error {
+func (h *HTTPHandler) askInstanceDeletion(c echo.Context) error {
 	if err := middlewares.RequireSettingsApp(c); err != nil {
 		return err
 	}
@@ -187,7 +207,7 @@ func askInstanceDeletion(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func clearMovedFrom(c echo.Context) error {
+func (h *HTTPHandler) clearMovedFrom(c echo.Context) error {
 	if !middlewares.IsLoggedIn(c) {
 		return echo.NewHTTPError(http.StatusForbidden)
 	}

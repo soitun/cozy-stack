@@ -25,7 +25,7 @@ import (
 	"github.com/cozy/cozy-stack/web/sharings"
 	"github.com/cozy/cozy-stack/web/statik"
 	"github.com/gavv/httpexpect/v2"
-	"github.com/gofrs/uuid"
+	"github.com/gofrs/uuid/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +44,7 @@ func TestReplicator(t *testing.T) {
 
 	const replDoctype = "io.cozy.replicator.tests"
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	build.BuildMode = build.ModeDev
 	config.GetConfig().Assets = "../../assets"
 	_ = web.LoadSupportedLocales()
@@ -118,7 +118,7 @@ func TestReplicator(t *testing.T) {
 		assert.NotNil(t, replSharingID)
 		assert.NotNil(t, replAccessToken)
 
-		id := replDoctype + "/" + uuidv4()
+		id := replDoctype + "/" + uuidv7()
 		createShared(t, id, []string{"111111111"}, replInstance, replSharingID)
 
 		t.Run("WithoutBearerToken", func(t *testing.T) {
@@ -147,17 +147,17 @@ func TestReplicator(t *testing.T) {
 		assert.NotEmpty(t, replSharingID)
 		assert.NotEmpty(t, replAccessToken)
 
-		sid1 := replDoctype + "/" + uuidv4()
+		sid1 := replDoctype + "/" + uuidv7()
 		createShared(t, sid1, []string{"1a", "1a", "1a"}, replInstance, replSharingID)
-		sid2 := replDoctype + "/" + uuidv4()
+		sid2 := replDoctype + "/" + uuidv7()
 		createShared(t, sid2, []string{"2a", "2a", "2a"}, replInstance, replSharingID)
-		sid3 := replDoctype + "/" + uuidv4()
+		sid3 := replDoctype + "/" + uuidv7()
 		createShared(t, sid3, []string{"3a", "3a", "3a"}, replInstance, replSharingID)
-		sid4 := replDoctype + "/" + uuidv4()
+		sid4 := replDoctype + "/" + uuidv7()
 		createShared(t, sid4, []string{"4a", "4a", "4a"}, replInstance, replSharingID)
-		sid5 := replDoctype + "/" + uuidv4()
+		sid5 := replDoctype + "/" + uuidv7()
 		createShared(t, sid5, []string{"5a", "5a", "5a"}, replInstance, replSharingID)
-		sid6 := replDoctype + "/" + uuidv4()
+		sid6 := replDoctype + "/" + uuidv7()
 
 		e := httpexpect.Default(t, tsR.URL)
 
@@ -181,26 +181,26 @@ func TestReplicator(t *testing.T) {
 		obj.NotContainsKey(sid2)
 
 		// sid3 was updated on the source
-		obj.Value(sid3).Object().Value("missing").Array().Equal([]string{"5-3b"})
+		obj.Value(sid3).Object().Value("missing").Array().IsEqual([]string{"5-3b"})
 
 		// sid4 is a conflict
-		obj.Value(sid4).Object().Value("missing").Array().Equal([]string{"2-4b", "2-4c", "4-4d"})
+		obj.Value(sid4).Object().Value("missing").Array().IsEqual([]string{"2-4b", "2-4c", "4-4d"})
 
 		// sid5 has been created on the target
 		obj.NotContainsKey(sid5)
 
 		// sid6 has been created on the source
-		obj.Value(sid6).Object().Value("missing").Array().Equal([]string{"1-6b"})
+		obj.Value(sid6).Object().Value("missing").Array().IsEqual([]string{"1-6b"})
 	})
 
 	t.Run("BulkDocs", func(t *testing.T) {
 		assert.NotEmpty(t, replSharingID)
 		assert.NotEmpty(t, replAccessToken)
 
-		id1 := uuidv4()
+		id1 := uuidv7()
 		sid1 := replDoctype + "/" + id1
 		createShared(t, sid1, []string{"aaa", "bbb"}, replInstance, replSharingID)
-		id2 := uuidv4()
+		id2 := uuidv7()
 		sid2 := replDoctype + "/" + id2
 
 		e := httpexpect.Default(t, tsR.URL)
@@ -239,7 +239,7 @@ func TestReplicator(t *testing.T) {
 	})
 
 	t.Run("CreateSharingForUploadFileTest", func(t *testing.T) {
-		dirID = uuidv4()
+		dirID = uuidv7()
 		ruleOne := sharing.Rule{
 			Title:    "file one",
 			DocType:  "io.cozy.files",
@@ -294,7 +294,7 @@ func TestReplicator(t *testing.T) {
 		assert.NotEmpty(t, fileSharingID)
 		assert.NotEmpty(t, fileAccessToken)
 
-		fileOneID := uuidv4()
+		fileOneID := uuidv7()
 
 		obj := e.PUT("/sharings/"+fileSharingID+"/io.cozy.files/"+fileOneID+"/metadata").
 			WithHeader("Authorization", "Bearer "+fileAccessToken).
@@ -368,19 +368,18 @@ func TestReplicator(t *testing.T) {
 			Expect().Status(200).
 			JSON().Object()
 
-		obj.ValueEqual("_id", xoredID)
-		obj.ValueEqual("_rev", folder.DocRev)
-		obj.ValueEqual("type", "directory")
-		obj.ValueEqual("name", "zorglub")
+		obj.HasValue("_id", xoredID)
+		obj.HasValue("_rev", folder.DocRev)
+		obj.HasValue("type", "directory")
+		obj.HasValue("name", "zorglub")
 		obj.NotContainsKey("dir_id")
-		obj.Value("created_at").String().DateTime(time.RFC3339)
-		obj.Value("updated_at").String().DateTime(time.RFC3339)
+		obj.Value("created_at").String().AsDateTime(time.RFC3339)
+		obj.Value("updated_at").String().AsDateTime(time.RFC3339)
 	})
 }
 
-func uuidv4() string {
-	id, _ := uuid.NewV4()
-	return id.String()
+func uuidv7() string {
+	return uuid.Must(uuid.NewV7()).String()
 }
 
 func createShared(t *testing.T, sid string, revisions []string, replInstance *instance.Instance, replSharingID string) *sharing.SharedRef {

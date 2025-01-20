@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,10 +19,13 @@ import (
 	"time"
 
 	apps "github.com/cozy/cozy-stack/model/app"
+	"github.com/cozy/cozy-stack/model/feature"
+	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/intent"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/session"
+	"github.com/cozy/cozy-stack/model/stack"
 	"github.com/cozy/cozy-stack/pkg/assets"
 	"github.com/cozy/cozy-stack/pkg/assets/dynamic"
 	"github.com/cozy/cozy-stack/pkg/assets/model"
@@ -47,11 +51,11 @@ func TestApps(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	config.GetConfig().Assets = "../../assets"
 	testutils.NeedCouchdb(t)
 	setup := testutils.NewSetup(t, t.Name())
-	require.NoError(t, setup.SetupSwiftTest(), "Could not init Swift test")
+	setup.SetupSwiftTest()
 
 	require.NoError(t, dynamic.InitDynamicAssetFS(config.FsURL().String()), "Could not init dynamic FS")
 	tempdir := t.TempDir()
@@ -75,13 +79,16 @@ func TestApps(t *testing.T) {
 	_ = lifecycle.ForceUpdatePassphrase(testInstance, []byte(pass), params)
 	testInstance.RegisterToken = nil
 	testInstance.OnboardingFinished = true
-	_ = testInstance.Update()
+	_ = instance.Update(testInstance)
 
 	slug, err := setup.InstallMiniApp()
 	require.NoError(t, err, "Could not install mini app")
 
-	_, err = setup.InstallMiniKonnector()
+	konnectorSlug, err := setup.InstallMiniKonnector()
 	require.NoError(t, err, "Could not install mini konnector")
+
+	clientSideSlug, err := setup.InstallMiniClientSideKonnector()
+	require.NoError(t, err, "Could not install miniClientSideKonnector konnector")
 
 	ts := setup.GetTestServer("/apps", webApps.WebappsRoutes, func(r *echo.Echo) *echo.Echo {
 		r.POST("/login", func(c echo.Context) error {
@@ -91,14 +98,11 @@ func TestApps(t *testing.T) {
 			return c.HTML(http.StatusOK, "OK")
 		})
 		r.POST("/auth/session_code", auth.CreateSessionCode)
-		router, err := web.CreateSubdomainProxy(r, webApps.Serve)
+		router, err := web.CreateSubdomainProxy(r, &stack.Services{}, webApps.Serve)
 		require.NoError(t, err, "Cant start subdoman proxy")
 		return router
 	})
 	t.Cleanup(ts.Close)
-
-	jar := setup.GetCookieJar()
-	client := &http.Client{Jar: jar}
 
 	// Login
 	cozysessID := testutils.CreateTestClient(t, ts.URL).POST("/login").
@@ -131,6 +135,39 @@ func TestApps(t *testing.T) {
 		assertInternalServerError(e, slug, testInstance.Domain, "/invalid")
 	})
 
+	t.Run("ServeWithClientsLimitExceeded", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		// Create the OAuth client for the flagship app
+		flagship := oauth.Client{
+			RedirectURIs: []string{"cozy://flagship"},
+			ClientName:   "flagship-app",
+			ClientKind:   "mobile",
+			SoftwareID:   "github.com/cozy/cozy-stack/testing/flagship",
+			Flagship:     true,
+		}
+		require.Nil(t, flagship.Create(testInstance, oauth.NotPending))
+
+		testutils.WithFlag(t, testInstance, "cozy.oauthclients.max", float64(0))
+
+		e = e.Builder(func(r *httpexpect.Request) {
+			r.WithCookie("cozysessid", cozysessID)
+		})
+
+		assertAuthGet(e, slug, testInstance.Domain, "/public", "text/html", "utf-8", "this is a file in public/")
+		assertAnonGet(e, slug, testInstance.Domain, "/public", "text/html", "utf-8", "this is a file in public/")
+
+		redirect := testInstance.SubDomain(slug)
+		redirect.Path = "/foo"
+		location := testInstance.PageURL("/settings/clients/limit-exceeded", url.Values{"redirect": {redirect.String()}})
+		assertRedirect(e, slug, testInstance.Domain, "/foo", 303, location)
+
+		assertAuthGet(e, slug, testInstance.Domain, "/foo/hello.html", "text/html", "utf-8", "world {{.Token}}")
+
+		testInstance.FeatureFlags = map[string]interface{}{}
+		require.NoError(t, instance.Update(testInstance))
+	})
+
 	t.Run("CozyBar", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
@@ -139,10 +176,63 @@ func TestApps(t *testing.T) {
 			WithCookie("cozysessid", cozysessID).
 			WithRedirectPolicy(httpexpect.DontFollowRedirects).
 			Expect().Status(200).
-			ContentType("text/html", "utf-8").
+			HasContentType("text/html", "utf-8").
 			Body().
 			Contains(`<link rel="stylesheet" type="text/css" href="//cozywithapps.example.net/assets/css/cozy-bar`).
 			Contains(`<script src="//cozywithapps.example.net/assets/js/cozy-bar`)
+	})
+
+	t.Run("Warnings", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		// Moved instance warning
+
+		testInstance.Moved = true
+		require.NoError(t, instance.Update(testInstance))
+
+		e.GET("/foo/").
+			WithHost(slug+"."+testInstance.Domain).
+			WithCookie("cozysessid", cozysessID).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains(`<meta name="user-action-required" data-title="Cozy has been moved" data-code="moved" data-detail="The Cozy has been moved to a new address"`)
+
+		testInstance.Moved = false
+		require.NoError(t, instance.Update(testInstance))
+
+		// TOS not signed warning
+
+		testutils.WithManager(t, testInstance, testutils.ManagerConfig{URL: "http://manager.example.org", WithPremiumLinks: true})
+
+		tosSigned := testInstance.TOSSigned
+		tosLatest := testInstance.TOSLatest
+		tomorrow := time.Now().Add(24 * time.Hour)
+		testInstance.TOSSigned = "1.0.0-20170901"
+		testInstance.TOSLatest = "2.0.0-" + tomorrow.Format("20060102")
+		require.NoError(t, instance.Update(testInstance))
+
+		notSigned, deadline := testInstance.CheckTOSNotSignedAndDeadline()
+		require.True(t, notSigned)
+		require.Equal(t, deadline, instance.TOSWarning)
+
+		tosLink, err := testInstance.ManagerURL(instance.ManagerTOSURL)
+		require.NoError(t, err)
+		require.NotEmpty(t, tosLink)
+
+		e.GET("/foo/").
+			WithHost(slug+"."+testInstance.Domain).
+			WithCookie("cozysessid", cozysessID).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains(`<meta name="user-action-required" data-title="TOS Updated" data-code="tos-updated" data-detail="Terms of services have been updated" data-links="` + tosLink + `"`)
+
+		testInstance.TOSSigned = tosSigned
+		testInstance.TOSLatest = tosLatest
+		require.NoError(t, instance.Update(testInstance))
 	})
 
 	t.Run("ServeWithAnIntents", func(t *testing.T) {
@@ -310,20 +400,20 @@ func TestApps(t *testing.T) {
 			Object()
 
 		data := obj.Value("data").Array()
-		data.Length().Equal(1)
+		data.Length().IsEqual(1)
 
-		elem := data.First().Object()
+		elem := data.Value(0).Object()
 		elem.Value("id").String().NotEmpty()
-		elem.ValueEqual("type", "io.cozy.apps")
+		elem.HasValue("type", "io.cozy.apps")
 
 		attrs := elem.Value("attributes").Object()
-		attrs.ValueEqual("name", "Mini")
-		attrs.ValueEqual("slug", "mini")
+		attrs.HasValue("name", "Mini")
+		attrs.HasValue("slug", "mini")
 
 		links := elem.Value("links").Object()
-		links.ValueEqual("self", "/apps/mini")
-		links.ValueEqual("related", "https://cozywithapps-mini.example.net/")
-		links.ValueEqual("icon", "/apps/mini/icon/1.0.0")
+		links.HasValue("self", "/apps/mini")
+		links.HasValue("related", "https://cozywithapps-mini.example.net/")
+		links.HasValue("icon", "/apps/mini/icon/1.0.0")
 	})
 
 	t.Run("IconForApp", func(t *testing.T) {
@@ -333,17 +423,17 @@ func TestApps(t *testing.T) {
 			WithHost(testInstance.Domain).
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
-			Body().Equal("<svg>...</svg>")
+			Body().IsEqual("<svg>...</svg>")
 	})
 
 	t.Run("DownloadApp", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", ts.URL+"/apps/mini/download", nil)
-		req.Header.Add("Authorization", "Bearer "+token)
-		req.Host = testInstance.Domain
-		res, err := client.Do(req)
-		require.NoError(t, err)
-		defer res.Body.Close()
-		require.Equal(t, 200, res.StatusCode)
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		res := e.GET("/apps/mini/download").
+			WithHost(testInstance.Domain).
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(200).
+			Raw()
 
 		mimeType, reader := filetype.FromReader(res.Body)
 		require.Equal(t, "application/gzip", mimeType)
@@ -365,13 +455,13 @@ func TestApps(t *testing.T) {
 	})
 
 	t.Run("DownloadKonnectorVersion", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", ts.URL+"/konnectors/mini/download/1.0.0", nil)
-		req.Header.Add("Authorization", "Bearer "+token)
-		req.Host = testInstance.Domain
-		res, err := client.Do(req)
-		require.NoError(t, err)
-		defer res.Body.Close()
-		require.Equal(t, 200, res.StatusCode)
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		res := e.GET("/konnectors/mini/download/1.0.0").
+			WithHost(testInstance.Domain).
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(200).
+			Raw()
 
 		mimeType, reader := filetype.FromReader(res.Body)
 		require.Equal(t, "application/gzip", mimeType)
@@ -394,6 +484,12 @@ func TestApps(t *testing.T) {
 
 	t.Run("OpenWebapp", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
+
+		// Expected flags since they can be modified by other tests
+		flags, err := feature.GetFlags(testInstance)
+		require.NoError(t, err)
+		flagsStr, err := json.Marshal(flags)
+		require.NoError(t, err)
 
 		// Create the OAuth client for the flagship app
 		flagship := oauth.Client{
@@ -418,20 +514,21 @@ func TestApps(t *testing.T) {
 
 		data := obj.Value("data").Object()
 		data.Value("id").String().NotEmpty()
-		data.ValueEqual("type", "io.cozy.apps.open")
+		data.HasValue("type", "io.cozy.apps.open")
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("AppName", "Mini")
-		attrs.ValueEqual("AppSlug", "mini")
-		attrs.ValueEqual("IconPath", "icon.svg")
-		attrs.ValueEqual("Tracking", "false")
-		attrs.ValueEqual("SubDomain", "flat")
+		attrs.HasValue("AppName", "Mini")
+		attrs.HasValue("AppSlug", "mini")
+		attrs.HasValue("IconPath", "icon.svg")
+		attrs.HasValue("Tracking", "false")
+		attrs.HasValue("SubDomain", "flat")
 		attrs.Value("Cookie").String().Contains("HttpOnly")
 		attrs.Value("Token").String().NotEmpty()
-		attrs.ValueEqual("Flags", "{}")
+		attrs.HasValue("Flags", string(flagsStr))
+		attrs.ContainsKey("Warnings")
 
 		links := data.Value("links").Object()
-		links.ValueEqual("self", "/apps/mini/open")
+		links.HasValue("self", "/apps/mini/open")
 	})
 
 	t.Run("UninstallAppWithLinkedClient", func(t *testing.T) {
@@ -558,14 +655,24 @@ func TestApps(t *testing.T) {
 		token, err := testInstance.MakeJWT(consts.AccessTokenAudience, flagship.ClientID, "*", "", time.Now())
 		require.NoError(t, err)
 
-		// Send logs for a konnector
-		e.POST("/konnectors/"+slug+"/logs").
+		// Send logs for a client side konnector
+		e.POST("/konnectors/"+clientSideSlug+"/logs").
 			WithHost(testInstance.Domain).
 			WithHeader("Authorization", "Bearer "+token).
 			WithBytes([]byte(`[ { "timestamp": "2022-10-27T17:13:38.382Z", "level": "error", "msg": "This is an error message" } ]`)).
 			Expect().Status(204)
 
-		assert.Equal(t, `time="2022-10-27T17:13:38Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
+		assert.Equal(t, `time="2022-10-27T17:13:38.382Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+clientSideSlug+" worker_id=client\n", testOutput.String())
+
+		// Send logs for a konnector
+		testOutput.Reset()
+		e.POST("/konnectors/"+konnectorSlug+"/logs").
+			WithHost(testInstance.Domain).
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(`[ { "timestamp": "2022-10-27T17:13:38.382Z", "level": "error", "msg": "This is an error message" } ]`)).
+			Expect().Status(204)
+
+		assert.Equal(t, `time="2022-10-27T17:13:38.382Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+konnectorSlug+"\n", testOutput.String())
 
 		// Send logs for a webapp
 		testOutput.Reset()
@@ -575,7 +682,7 @@ func TestApps(t *testing.T) {
 			WithBytes([]byte(`[ { "timestamp": "2022-10-27T17:13:38.382Z", "level": "error", "msg": "This is an error message" } ]`)).
 			Expect().Status(204)
 
-		assert.Equal(t, `time="2022-10-27T17:13:38Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
+		assert.Equal(t, `time="2022-10-27T17:13:38.382Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
 	})
 
 	t.Run("SendKonnectorLogsFromKonnector", func(t *testing.T) {
@@ -595,7 +702,7 @@ func TestApps(t *testing.T) {
 			WithBytes([]byte(`[ { "timestamp": "2022-10-27T17:13:38.382Z", "level": "error", "msg": "This is an error message" } ]`)).
 			Expect().Status(204)
 
-		assert.Equal(t, `time="2022-10-27T17:13:38Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
+		assert.Equal(t, `time="2022-10-27T17:13:38.382Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
 
 		// Sending logs for a webapp should fail
 		e.POST("/apps/"+slug+"/logs").
@@ -622,7 +729,7 @@ func TestApps(t *testing.T) {
 			WithBytes([]byte(`[ { "timestamp": "2022-10-27T17:13:38.382Z", "level": "error", "msg": "This is an error message" } ]`)).
 			Expect().Status(204)
 
-		assert.Equal(t, `time="2022-10-27T17:13:38Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
+		assert.Equal(t, `time="2022-10-27T17:13:38.382Z" level=error msg="This is an error message" domain=`+domain+" job_id= nspace=jobs slug="+slug+"\n", testOutput.String())
 
 		// Sending logs for a konnector should fail
 		e.POST("/konnectors/"+slug+"/logs").
@@ -637,7 +744,7 @@ func assertAuthGet(e *httpexpect.Expect, slug, domain, path, contentType, charse
 	e.GET(path).
 		WithHost(slug+"."+domain).
 		Expect().Status(200).
-		ContentType(contentType, charset).
+		HasContentType(contentType, charset).
 		Body().Contains(content)
 }
 
@@ -645,7 +752,7 @@ func assertAnonGet(e *httpexpect.Expect, slug, domain, path, contentType, charse
 	e.GET(path).
 		WithHost(slug+"."+domain).
 		Expect().Status(200).
-		ContentType(contentType, charset).
+		HasContentType(contentType, charset).
 		Body().Contains(content)
 }
 
@@ -654,7 +761,7 @@ func assertNotPublic(e *httpexpect.Expect, slug, domain, path string, code int, 
 		WithHost(slug + "." + domain).
 		WithRedirectPolicy(httpexpect.DontFollowRedirects).
 		Expect().Status(code).
-		Header("Location").Equal(location)
+		Header("Location").IsEqual(location)
 }
 
 func assertNotFound(e *httpexpect.Expect, slug, domain, path string) {
@@ -668,4 +775,12 @@ func assertInternalServerError(e *httpexpect.Expect, slug, domain, path string) 
 	e.GET(path).
 		WithHost(slug + "." + domain).
 		Expect().Status(500)
+}
+
+func assertRedirect(e *httpexpect.Expect, slug, domain, path string, code int, location string) {
+	e.GET(path).
+		WithHost(slug + "." + domain).
+		WithRedirectPolicy(httpexpect.DontFollowRedirects).
+		Expect().Status(code).
+		Header("Location").IsEqual(location)
 }

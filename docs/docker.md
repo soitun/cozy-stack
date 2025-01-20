@@ -2,12 +2,16 @@
 
 # Docker
 
-This page list various operations that can be automated _via_ Docker.
+This page list various operations that can be automated _via_ Docker when
+developing cozy-stack.
+
+For docker usage in production to self-host your cozy instance, please refer
+to our [Self Hosting Documentation](https://docs.cozy.io/en/tutorials/selfhosting/).
 
 ## Running a CouchDB instance
 
-This will run a new instance of CouchDB in `single` mode (no cluster) and in
-`admin-party-mode` (no user). This command exposes couchdb on the port `5984`.
+This will run a new instance of CouchDB in `single` mode (no cluster). This
+command exposes couchdb on the port `5984`.
 
 ```bash
 $ docker run -d \
@@ -16,7 +20,7 @@ $ docker run -d \
     -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=password \
     -v $HOME/.cozy-stack-couch:/opt/couchdb/data \
     couchdb:3.3
-$ curl -X PUT http://127.0.0.1:5984/{_users,_replicator}
+$ curl -X PUT http://admin:password@127.0.0.1:5984/{_users,_replicator}
 ```
 
 Verify your installation at: http://127.0.0.1:5984/_utils/#verifyinstall.
@@ -37,14 +41,14 @@ docker run -it --rm --name cozy-stack \
     --workdir /app \
     -v $(pwd):/app \
     -v $(pwd):/go/bin \
-    golang:1.20 \
+    golang:1.23 \
     go get -v github.com/cozy/cozy-stack
 ```
 
 ## Publishing a new cozy-app-dev image
 
 We publish the cozy-app-dev image when we release a new version of the stack.
-See `scripts/release.sh` for details.
+See `scripts/docker/cozy-app-dev/release.sh` for details.
 
 ## Docker run and url name for cozy-app-dev
 
@@ -68,7 +72,8 @@ $ docker run -it --rm --name=oodev --net=host cozy/onlyoffice-dev
 and run the stack with:
 
 ```bash
-$ cozy-stack serve --disable-csp --onlyoffice-url=http://localhost:8000/ --onlyoffice-inbox-secret=inbox_secret --onlyoffice-outbox-secret=outbox_secret
+$ cozy-stack serve --disable-csp --onlyoffice-url=http://localhost:8000 --onlyoffice-inbox-secret=inbox_secret --onlyoffice-outbox-secret=outbox_secret
+$ cozy-stack features defaults '{"drive.office": {"enabled": true, "write": true}}'
 ```
 
 If you need to rebuild it, you can do that with:

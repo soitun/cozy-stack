@@ -15,6 +15,7 @@ import (
 
 	"github.com/cozy/cozy-stack/client/request"
 	"github.com/cozy/cozy-stack/model/instance"
+	"github.com/cozy/cozy-stack/model/note"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -208,7 +209,7 @@ func EnsureSharedWithMeDir(inst *instance.Instance) (*vfs.DirDoc, error) {
 		} else {
 			dir.CozyMetadata.UpdatedAt = now
 		}
-		_, err = vfs.RestoreDir(fs, dir)
+		dir, err = vfs.RestoreDir(fs, dir)
 		if err != nil {
 			inst.Logger().WithNamespace("sharing").
 				Warnf("EnsureSharedWithMeDir failed to restore the dir: %s", err)
@@ -265,13 +266,13 @@ func (s *Sharing) CreateDirForSharing(inst *instance.Instance, rule *Rule, paren
 		return nil, err
 	}
 	dir, err := vfs.NewDirDocWithParent(rule.Title, parent, []string{"from-sharing-" + s.SID})
-	parts := strings.Split(rule.Values[0], "/")
-	dir.DocID = parts[len(parts)-1]
 	if err != nil {
 		inst.Logger().WithNamespace("sharing").
 			Warnf("CreateDirForSharing failed to make dir: %s", err)
 		return nil, err
 	}
+	parts := strings.Split(rule.Values[0], "/")
+	dir.DocID = parts[len(parts)-1]
 	dir.AddReferencedBy(couchdb.DocReference{
 		ID:   s.SID,
 		Type: consts.Sharings,
@@ -335,6 +336,22 @@ func (s *Sharing) AddReferenceForSharingDir(inst *instance.Instance, rule *Rule)
 // GetSharingDir returns the directory used by this sharing for putting files
 // and folders that have no dir_id.
 func (s *Sharing) GetSharingDir(inst *instance.Instance) (*vfs.DirDoc, error) {
+	// When we can, find the sharing dir by its ID
+	fs := inst.VFS()
+	rule := s.FirstFilesRule()
+	if rule != nil {
+		if rule.Mime != "" {
+			inst.Logger().WithNamespace("sharing").
+				Warnf("GetSharingDir called for only one file: %s", s.SID)
+			return nil, ErrInternalServerError
+		}
+		dir, _ := fs.DirByID(rule.Values[0])
+		if dir != nil {
+			return dir, nil
+		}
+	}
+
+	// Else, try to find it by a reference
 	key := []string{consts.Sharings, s.SID}
 	end := []string{key[0], key[1], couchdb.MaxString}
 	req := &couchdb.ViewRequest{
@@ -351,7 +368,7 @@ func (s *Sharing) GetSharingDir(inst *instance.Instance) (*vfs.DirDoc, error) {
 	}
 	var parentID string
 	if len(res.Rows) > 0 {
-		dir, file, err := inst.VFS().DirOrFileByID(res.Rows[0].ID)
+		dir, file, err := fs.DirOrFileByID(res.Rows[0].ID)
 		if err != nil {
 			inst.Logger().WithNamespace("sharing").
 				Warnf("GetSharingDir failed to find dir: %s", err)
@@ -362,7 +379,7 @@ func (s *Sharing) GetSharingDir(inst *instance.Instance) (*vfs.DirDoc, error) {
 		}
 		// file is a shortcut
 		parentID = file.DirID
-		if err := inst.VFS().DestroyFile(file); err != nil {
+		if err := fs.DestroyFile(file); err != nil {
 			inst.Logger().WithNamespace("sharing").
 				Warnf("GetSharingDir failed to delete shortcut: %s", err)
 			return nil, err
@@ -370,12 +387,12 @@ func (s *Sharing) GetSharingDir(inst *instance.Instance) (*vfs.DirDoc, error) {
 		s.ShortcutID = ""
 		_ = couchdb.UpdateDoc(inst, s)
 	}
-	rule := s.FirstFilesRule()
 	if rule == nil {
 		inst.Logger().WithNamespace("sharing").
 			Errorf("no first rule for: %#v", s)
 		return nil, ErrInternalServerError
 	}
+	// And, we may have to create it in last resort
 	return s.CreateDirForSharing(inst, rule, parentID)
 }
 
@@ -611,7 +628,7 @@ func (s *Sharing) ApplyBulkFiles(inst *instance.Instance, docs DocsList) error {
 		if err != nil {
 			inst.Logger().WithNamespace("replicator").
 				Debugf("Error on apply bulk file: %s (%#v - %#v)", err, target, ref)
-			errm = multierror.Append(errm, err)
+			errm = multierror.Append(errm, fmt.Errorf("%s - %w", id, err))
 		}
 	}
 
@@ -629,9 +646,70 @@ func (s *Sharing) ApplyBulkFiles(inst *instance.Instance, docs DocsList) error {
 		}
 	}
 
-	if errm != nil {
-		inst.Logger().WithNamespace("replicator").
-			Warnf("Error on apply bulk files: %s", errm)
+	return errm
+}
+
+func (s *Sharing) GetNotes(inst *instance.Instance) ([]*vfs.FileDoc, error) {
+	rule := s.FirstFilesRule()
+	if rule != nil {
+		if rule.Mime != "" {
+			if rule.Mime == consts.NoteMimeType {
+				var notes []*vfs.FileDoc
+				req := &couchdb.AllDocsRequest{Keys: rule.Values}
+				if err := couchdb.GetAllDocs(inst, consts.Files, req, &notes); err != nil {
+					return nil, fmt.Errorf("failed to fetch notes shared by themselves: %w", err)
+				}
+
+				return notes, nil
+			} else {
+				return nil, nil
+			}
+		}
+
+		sharingDir, err := s.GetSharingDir(inst)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get notes sharing dir: %w", err)
+		}
+
+		var notes []*vfs.FileDoc
+		fs := inst.VFS()
+		iter := fs.DirIterator(sharingDir, nil)
+		for {
+			_, f, err := iter.Next()
+			if errors.Is(err, vfs.ErrIteratorDone) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to get next shared note: %w", err)
+			}
+			if f != nil && f.Mime == consts.NoteMimeType {
+				notes = append(notes, f)
+			}
+		}
+
+		return notes, nil
+	}
+
+	return nil, nil
+}
+
+func (s *Sharing) FixRevokedNotes(inst *instance.Instance) error {
+	docs, err := s.GetNotes(inst)
+	if err != nil {
+		return fmt.Errorf("failed to get revoked sharing notes: %w", err)
+	}
+
+	var errm error
+	for _, doc := range docs {
+		// If the note came from another cozy via a sharing that is now revoked, we
+		// may need to recreate the trigger.
+		if err := note.SetupTrigger(inst, doc.ID()); err != nil {
+			errm = multierror.Append(errm, fmt.Errorf("failed to setup revoked note trigger: %w", err))
+		}
+
+		if err := note.ImportImages(inst, doc); err != nil {
+			errm = multierror.Append(errm, fmt.Errorf("failed to import revoked note images: %w", err))
+		}
 	}
 	return errm
 }
@@ -695,6 +773,10 @@ func copySafeFieldsToDir(target map[string]interface{}, dir *vfs.DirDoc) {
 		if at, err := time.Parse(time.RFC3339Nano, updated); err == nil {
 			dir.UpdatedAt = at
 		}
+	}
+
+	if meta, ok := target["metadata"].(map[string]interface{}); ok {
+		dir.Metadata = vfs.Metadata(meta).RemoveCertifiedMetadata()
 	}
 
 	if meta, ok := target["cozyMetadata"].(map[string]interface{}); ok {
@@ -864,7 +946,7 @@ func (s *Sharing) recreateParent(inst *instance.Instance, dirID string) (*vfs.Di
 		Debugf("Recreate parent dirID=%s", dirID)
 	doc, err := s.getDirDocFromNetwork(inst, dirID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recreateParent: %w", err)
 	}
 	fs := inst.VFS()
 	var parent *vfs.DirDoc
@@ -889,7 +971,7 @@ func (s *Sharing) recreateParent(inst *instance.Instance, dirID string) (*vfs.Di
 		if errors.Is(err, os.ErrExist) {
 			return fs.DirByID(dirID)
 		}
-		return nil, err
+		return nil, fmt.Errorf("recreateParent: %w", err)
 	}
 	return doc, nil
 }
@@ -984,6 +1066,7 @@ func (s *Sharing) CreateDir(inst *instance.Instance, target map[string]interface
 		if name != "" {
 			indexer.IncrementRevision()
 			dir.DocName = name
+			dir.Fullpath = path.Join(path.Dir(dir.Fullpath), dir.DocName)
 		}
 		err = fs.CreateDir(dir)
 	}
@@ -1073,6 +1156,7 @@ func (s *Sharing) UpdateDir(
 		if name != "" {
 			indexer.IncrementRevision()
 			dir.DocName = name
+			dir.Fullpath = path.Join(path.Dir(dir.Fullpath), dir.DocName)
 		}
 		err = fs.UpdateDirDoc(oldDoc, dir)
 	}
@@ -1104,14 +1188,17 @@ func (s *Sharing) TrashDir(inst *instance.Instance, dir *vfs.DirDoc) error {
 	fs := inst.VFS()
 	exists, err := fs.DirChildExists(newdir.DirID, newdir.DocName)
 	if err != nil {
-		return err
+		return fmt.Errorf("Sharing.TrashDir: %w", err)
 	}
 	if exists {
 		newdir.DocName = conflictName(fs, newdir.DirID, newdir.DocName, true)
 	}
 	newdir.Fullpath = path.Join(vfs.TrashDirName, newdir.DocName)
 	newdir.RestorePath = path.Dir(dir.Fullpath)
-	return s.dissociateDir(inst, dir, newdir)
+	if err := s.dissociateDir(inst, dir, newdir); err != nil {
+		return fmt.Errorf("Sharing.TrashDir: %w", err)
+	}
+	return nil
 }
 
 func (s *Sharing) dissociateDir(inst *instance.Instance, olddoc, newdoc *vfs.DirDoc) error {
@@ -1131,6 +1218,7 @@ func (s *Sharing) dissociateDir(inst *instance.Instance, olddoc, newdoc *vfs.Dir
 	var ref SharedRef
 	if err := couchdb.GetDoc(inst, consts.Shared, sid, &ref); err == nil {
 		if s.Owner {
+			ref.Revisions.Add(olddoc.Rev())
 			ref.Infos[s.SID] = SharedInfo{
 				Rule:        ref.Infos[s.SID].Rule,
 				Binary:      false,
@@ -1190,7 +1278,10 @@ func (s *Sharing) TrashFile(inst *instance.Instance, file *vfs.FileDoc, rule *Ru
 	removeReferencesFromRule(file, rule)
 	if s.Owner && rule.Selector == couchdb.SelectorReferencedBy {
 		// Do not move/trash photos removed from an album for the owner
-		return s.dissociateFile(inst, olddoc, file)
+		if err := s.dissociateFile(inst, olddoc, file); err != nil {
+			return fmt.Errorf("Sharing.TrashFile: %w", err)
+		}
+		return nil
 	}
 	if len(file.ReferencedBy) == 0 {
 		oldpath, err := olddoc.Path(inst.VFS())
@@ -1201,15 +1292,21 @@ func (s *Sharing) TrashFile(inst *instance.Instance, file *vfs.FileDoc, rule *Ru
 		file.Trashed = true
 		file.DirID = consts.TrashDirID
 		file.ResetFullpath()
-		return s.dissociateFile(inst, olddoc, file)
+		if err := s.dissociateFile(inst, olddoc, file); err != nil {
+			return fmt.Errorf("Sharing.TrashFile: %w", err)
+		}
+		return nil
 	}
 	parent, err := s.GetNoLongerSharedDir(inst)
 	if err != nil {
-		return err
+		return fmt.Errorf("Sharing.TrashFile: %w", err)
 	}
 	file.DirID = parent.DocID
 	file.ResetFullpath()
-	return s.dissociateFile(inst, olddoc, file)
+	if err := s.dissociateFile(inst, olddoc, file); err != nil {
+		return fmt.Errorf("Sharing.TrashFile: %w", err)
+	}
+	return nil
 }
 
 func (s *Sharing) dissociateFile(inst *instance.Instance, olddoc, newdoc *vfs.FileDoc) error {
@@ -1236,6 +1333,7 @@ func (s *Sharing) dissociateFile(inst *instance.Instance, olddoc, newdoc *vfs.Fi
 	if !s.Owner {
 		return couchdb.DeleteDoc(inst, &ref)
 	}
+	ref.Revisions.Add(olddoc.Rev())
 	ref.Infos[s.SID] = SharedInfo{
 		Rule:        ref.Infos[s.SID].Rule,
 		Binary:      false,
@@ -1265,6 +1363,9 @@ func dirToJSONDoc(dir *vfs.DirDoc, instanceURL string) couchdb.JSONDoc {
 	}
 	if dir.RestorePath != "" {
 		doc.M["restore_path"] = dir.RestorePath
+	}
+	if len(dir.Metadata) > 0 {
+		doc.M["metadata"] = dir.Metadata.RemoveCertifiedMetadata()
 	}
 	fcm := dir.CozyMetadata
 	if fcm == nil {
@@ -1303,7 +1404,10 @@ func fileToJSONDoc(file *vfs.FileDoc, instanceURL string) couchdb.JSONDoc {
 		doc.M["restore_path"] = file.RestorePath
 	}
 	if len(file.Metadata) > 0 {
-		doc.M["metadata"] = file.Metadata.RemoveCertifiedMetadata()
+		meta := file.Metadata
+		meta = meta.RemoveCertifiedMetadata()
+		meta = meta.RemoveFavoriteMetadata()
+		doc.M["metadata"] = meta
 	}
 	fcm := file.CozyMetadata
 	if fcm == nil {

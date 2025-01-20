@@ -8,7 +8,7 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -21,7 +21,7 @@ func TestDelegated(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	conf := config.GetConfig()
 	conf.Authentication = make(map[string]interface{})
 	confAuth := make(map[string]interface{})

@@ -17,7 +17,6 @@ import (
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/crypto"
-	"github.com/cozy/cozy-stack/pkg/hooks"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/utils"
@@ -36,6 +35,8 @@ type Options struct {
 	TOSLatest          string
 	Timezone           string
 	ContextName        string
+	Sponsorships       []string
+	FeatureSets        []string
 	Email              string
 	PublicName         string
 	Settings           string
@@ -74,22 +75,6 @@ func (opts *Options) trace(name string, do func()) {
 
 // Create builds an instance and initializes it
 func Create(opts *Options) (*instance.Instance, error) {
-	domain, err := validateDomain(opts.Domain)
-	if err != nil {
-		return nil, err
-	}
-	var inst *instance.Instance
-	err = hooks.Execute("add-instance", []string{domain}, func() error {
-		var err2 error
-		inst, err2 = CreateWithoutHooks(opts)
-		return err2
-	})
-	return inst, err
-}
-
-// CreateWithoutHooks builds an instance and initializes it. The difference
-// with Create is that script hooks are not executed for this function.
-func CreateWithoutHooks(opts *Options) (*instance.Instance, error) {
 	domain := opts.Domain
 	var err error
 	opts.trace("validate domain", func() {
@@ -99,7 +84,7 @@ func CreateWithoutHooks(opts *Options) (*instance.Instance, error) {
 		return nil, err
 	}
 	opts.trace("check if instance already exist", func() {
-		_, err = instance.GetFromCouch(domain)
+		_, err = instance.Get(domain)
 	})
 	if !errors.Is(err, instance.ErrNotFound) {
 		if err == nil {
@@ -136,6 +121,8 @@ func CreateWithoutHooks(opts *Options) (*instance.Instance, error) {
 	i.TOSSigned = opts.TOSSigned
 	i.TOSLatest = opts.TOSLatest
 	i.ContextName = opts.ContextName
+	i.Sponsorships = opts.Sponsorships
+	i.FeatureSets = opts.FeatureSets
 	i.BytesDiskQuota = opts.DiskQuota
 	i.IndexViewsVersion = couchdb.IndexViewsVersion
 	opts.trace("generate secrets", func() {
@@ -212,6 +199,8 @@ func CreateWithoutHooks(opts *Options) (*instance.Instance, error) {
 		i.MagicLink = *magicLink
 	}
 
+	passwordDefined := opts.Passphrase != ""
+
 	// If the password authentication is disabled, we force a random password.
 	// It won't be known by the user and cannot be used to authenticate. It
 	// will only be used if the configuration is changed later: the user will
@@ -238,6 +227,7 @@ func CreateWithoutHooks(opts *Options) (*instance.Instance, error) {
 		i.OnboardingFinished = true
 	}
 
+	i.SetPasswordDefined(passwordDefined)
 	if onboardingFinished := opts.OnboardingFinished; onboardingFinished != nil {
 		i.OnboardingFinished = *onboardingFinished
 	}
@@ -324,6 +314,14 @@ func buildSettings(inst *instance.Instance, opts *Options) (*couchdb.JSONDoc, er
 	if contextName, ok := settings.M["context"].(string); ok {
 		opts.ContextName = contextName
 		delete(settings.M, "context")
+	}
+	if sponsorships, ok := settings.M["sponsorships"].([]string); ok {
+		opts.Sponsorships = sponsorships
+		delete(settings.M, "sponsorships")
+	}
+	if featureSets, ok := settings.M["feature_sets"].([]string); ok {
+		opts.FeatureSets = featureSets
+		delete(settings.M, "feature_sets")
 	}
 	if locale, ok := settings.M["locale"].(string); ok {
 		opts.Locale = locale

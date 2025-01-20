@@ -26,11 +26,11 @@ cozy-stack fix <command> [flags]
 
 * [cozy-stack](cozy-stack.md)	 - cozy-stack is the main command
 * [cozy-stack fix contact-emails](cozy-stack_fix_contact-emails.md)	 - Detect and try to fix invalid emails on contacts
-* [cozy-stack fix content-mismatch](cozy-stack_fix_content-mismatch.md)	 - Fix the content mismatch differences for 64K issue
 * [cozy-stack fix indexes](cozy-stack_fix_indexes.md)	 - Rebuild the CouchDB views and indexes
 * [cozy-stack fix jobs](cozy-stack_fix_jobs.md)	 - Take a look at the consistency of the jobs
 * [cozy-stack fix mime](cozy-stack_fix_mime.md)	 - Fix the class computed from the mime-type
 * [cozy-stack fix orphan-account](cozy-stack_fix_orphan-account.md)	 - Remove the orphan accounts
+* [cozy-stack fix password-defined](cozy-stack_fix_password-defined.md)	 - Set the password_defined setting
 * [cozy-stack fix redis](cozy-stack_fix_redis.md)	 - Rebuild scheduling data strucutures in redis
 * [cozy-stack fix service-triggers](cozy-stack_fix_service-triggers.md)	 - Clean the triggers for webapp services
 * [cozy-stack fix thumbnails](cozy-stack_fix_thumbnails.md)	 - Rebuild thumbnails image for images files

@@ -1,3 +1,4 @@
+// Package cmd is where the CLI commands and options are defined.
 package cmd
 
 import (
@@ -85,27 +86,28 @@ example), you can use the --appdir flag like this:
 
 		if flagMailhog {
 			cfg := config.GetConfig()
+			cfg.Mail.NativeTLS = false
 			cfg.Mail.DisableTLS = true
 			cfg.Mail.Port = 1025
+			cfg.CampaignMail.NativeTLS = false
+			cfg.CampaignMail.DisableTLS = true
+			cfg.CampaignMail.Port = 1025
 		}
 
-		processes, err := stack.Start()
+		processes, services, err := stack.Start()
 		if err != nil {
 			return err
 		}
 
 		var servers *web.Servers
 		if apps != nil {
-			servers, err = web.ListenAndServeWithAppDir(apps)
+			servers, err = web.ListenAndServeWithAppDir(apps, services)
 		} else {
-			servers, err = web.ListenAndServe()
+			servers, err = web.ListenAndServe(services)
 		}
 		if err != nil {
 			return err
 		}
-
-		fmt.Println("Ready and waiting for connections:")
-		servers.Start()
 
 		group := utils.NewGroupShutdown(servers, processes)
 
@@ -193,11 +195,14 @@ func init() {
 	flags.StringSlice("flagship-apk-certificate-digests", []string{"u2eUUnfB4Y7k7eqQL7u2jiYDJeVBwZoSV3PZSs8pttc="}, "SHA-256 hash (base64 encoded) of the flagship app's signing certificate on android")
 	checkNoErr(viper.BindPFlag("flagship.apk_certificate_digests", flags.Lookup("flagship-apk-certificate-digests")))
 
+	flags.StringSlice("flagship-play-integrity-decryption-keys", []string{"bVcBAv0eO64NKIvDoRHpnTOZVxAkhMuFwRHrTEMr23U="}, "Decryption key for the Google Play Integrity API")
+	checkNoErr(viper.BindPFlag("flagship.play_integrity_decryption_keys", flags.Lookup("flagship-play-integrity-decryption-keys")))
+
+	flags.StringSlice("flagship-play-integrity-verification-keys", []string{"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElTF2uARN7oxfoDWyERYMe6QutI2NqS+CAtVmsPDIRjBBxF96fYojFVXRRsMb86PjkE21Ol+sO1YuspY+YuDRMw=="}, "Verification key for the Google Play Integrity API")
+	checkNoErr(viper.BindPFlag("flagship.play_integrity_verification_keys", flags.Lookup("flagship-play-integrity-verification-keys")))
+
 	flags.StringSlice("flagship-apple-app-ids", []string{"3AKXFMV43J.io.cozy.drive.mobile", "3AKXFMV43J.io.cozy.flagship.mobile"}, "App ID of the flagship app on iOS")
 	checkNoErr(viper.BindPFlag("flagship.apple_app_ids", flags.Lookup("flagship-apple-app-ids")))
-
-	flags.String("hooks", ".", "define the directory used for hook scripts")
-	checkNoErr(viper.BindPFlag("hooks", flags.Lookup("hooks")))
 
 	flags.String("geodb", ".", "define the location of the database for IP -> City lookups")
 	checkNoErr(viper.BindPFlag("geodb", flags.Lookup("geodb")))
@@ -208,7 +213,7 @@ func init() {
 	flags.String("mail-noreply-address", "", "mail address used for sending mail as a noreply (forgot passwords for example)")
 	checkNoErr(viper.BindPFlag("mail.noreply_address", flags.Lookup("mail-noreply-address")))
 
-	flags.String("mail-noreply-name", "", "mail name used for sending mail as a noreply (forgot passwords for example)")
+	flags.String("mail-noreply-name", "My Cozy", "mail name used for sending mail as a noreply (forgot passwords for example)")
 	checkNoErr(viper.BindPFlag("mail.noreply_name", flags.Lookup("mail-noreply-name")))
 
 	flags.String("mail-reply-to", "", "mail address used to the reply-to (support for example)")
@@ -217,7 +222,7 @@ func init() {
 	flags.String("mail-host", "localhost", "mail smtp host")
 	checkNoErr(viper.BindPFlag("mail.host", flags.Lookup("mail-host")))
 
-	flags.Int("mail-port", 465, "mail smtp port")
+	flags.Int("mail-port", 25, "mail smtp port")
 	checkNoErr(viper.BindPFlag("mail.port", flags.Lookup("mail-port")))
 
 	flags.String("mail-username", "", "mail smtp username")
@@ -226,8 +231,14 @@ func init() {
 	flags.String("mail-password", "", "mail smtp password")
 	checkNoErr(viper.BindPFlag("mail.password", flags.Lookup("mail-password")))
 
-	flags.Bool("mail-disable-tls", false, "disable smtp over tls")
+	flags.Bool("mail-use-ssl", false, "use ssl for mail sending (smtps)")
+	checkNoErr(viper.BindPFlag("mail.use_ssl", flags.Lookup("mail-use-ssl")))
+
+	flags.Bool("mail-disable-tls", true, "disable starttls on smtp")
 	checkNoErr(viper.BindPFlag("mail.disable_tls", flags.Lookup("mail-disable-tls")))
+
+	flags.String("mail-local-name", "localhost", "hostname sent to the smtp server with the HELO command")
+	checkNoErr(viper.BindPFlag("mail.local_name", flags.Lookup("mail-local-name")))
 
 	flags.String("move-url", "https://move.cozycloud.cc/", "URL for the move wizard")
 	checkNoErr(viper.BindPFlag("move.url", flags.Lookup("move-url")))

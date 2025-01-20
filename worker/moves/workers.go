@@ -23,14 +23,14 @@ func init() {
 		WorkerType:   "import",
 		Concurrency:  runtime.NumCPU(),
 		MaxExecCount: 1,
-		Timeout:      1 * time.Hour,
+		Timeout:      3 * time.Hour,
 		WorkerFunc:   ImportWorker,
 	})
 }
 
 // ExportWorker is the worker responsible for creating an export of the
 // instance.
-func ExportWorker(c *job.WorkerContext) error {
+func ExportWorker(c *job.TaskContext) error {
 	var opts move.ExportOptions
 	if err := c.UnmarshalMessage(&opts); err != nil {
 		return err
@@ -67,7 +67,7 @@ func ExportWorker(c *job.WorkerContext) error {
 
 // ImportWorker is the worker responsible for inserting the data from an export
 // inside an instance.
-func ImportWorker(c *job.WorkerContext) error {
+func ImportWorker(c *job.TaskContext) error {
 	var opts move.ImportOptions
 	if err := c.UnmarshalMessage(&opts); err != nil {
 		return err
@@ -82,7 +82,7 @@ func ImportWorker(c *job.WorkerContext) error {
 	if erru := lifecycle.Unblock(c.Instance); erru != nil {
 		// Try again
 		time.Sleep(10 * time.Second)
-		inst, errg := instance.GetFromCouch(c.Instance.Domain)
+		inst, errg := instance.Get(c.Instance.Domain)
 		if errg == nil {
 			erru = lifecycle.Unblock(inst)
 		}

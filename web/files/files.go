@@ -25,6 +25,7 @@ import (
 	"github.com/cozy/cozy-stack/model/note"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
+	"github.com/cozy/cozy-stack/model/rag"
 	"github.com/cozy/cozy-stack/model/sharing"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/assets/statik"
@@ -57,6 +58,21 @@ const TagSeparator = ","
 // ErrDocTypeInvalid is used when the document type sent is not
 // recognized
 var ErrDocTypeInvalid = errors.New("Invalid document type")
+
+// SharedDrivesCreationHandler is the handler for POST /files/drives. It
+// creates the directory where shared and external drives are saved if it
+// doesn't exist, and return information about this directory.
+func SharedDrivesCreationHandler(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.Files); err != nil {
+		return err
+	}
+	doc, err := inst.EnsureSharedDrivesDir()
+	if err != nil {
+		return wrapVfsError(err)
+	}
+	return jsonapi.Data(c, http.StatusOK, newDir(doc), nil)
+}
 
 // CreationHandler handle all POST requests on /files/:file-id
 // aiming at creating a new document in the FS. Given the Type
@@ -178,6 +194,28 @@ func createDirHandler(c echo.Context, fs vfs.VFS) (*dir, error) {
 	if updated := c.QueryParam("UpdatedAt"); updated != "" {
 		if at, err3 := time.Parse(time.RFC3339, updated); err3 == nil {
 			doc.UpdatedAt = at
+		}
+	}
+
+	if secret := c.QueryParam("MetadataID"); secret != "" {
+		instance := middlewares.GetInstance(c)
+		meta, err := vfs.GetStore().GetMetadata(instance, secret)
+		if err != nil {
+			return nil, err
+		}
+		doc.Metadata = *meta
+	}
+
+	if len(doc.Metadata) > 0 {
+		if _, ok := doc.Metadata[consts.CarbonCopyKey]; ok {
+			if err := middlewares.AllowWholeType(c, permission.POST, consts.CertifiedCarbonCopy); err != nil {
+				delete(doc.Metadata, consts.CarbonCopyKey)
+			}
+		}
+		if _, ok := doc.Metadata[consts.ElectronicSafeKey]; ok {
+			if err := middlewares.AllowWholeType(c, permission.POST, consts.CertifiedElectronicSafe); err != nil {
+				delete(doc.Metadata, consts.ElectronicSafeKey)
+			}
 		}
 	}
 
@@ -335,12 +373,35 @@ func FileCopyHandler(c echo.Context) error {
 	newdoc.ResetFullpath()
 	updateFileCozyMetadata(c, newdoc, true)
 
-	err = fs.CopyFile(olddoc, newdoc)
+	if olddoc.Mime == consts.NoteMimeType {
+		// We need a special copy for notes because of their images
+		err = note.CopyFile(inst, olddoc, newdoc)
+	} else {
+		err = fs.CopyFile(olddoc, newdoc)
+	}
 	if err != nil {
 		return WrapVfsError(err)
 	}
 
 	return FileData(c, http.StatusCreated, newdoc, false, nil)
+}
+
+func AddDescription(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	fileID := c.Param("file-id")
+	doc, err := inst.VFS().FileByID(fileID)
+	if err != nil {
+		return WrapVfsError(err)
+	}
+	err = checkPerm(c, permission.POST, nil, doc)
+	if err != nil {
+		return err
+	}
+	newdoc, err := rag.AddDescriptionToFile(inst, doc)
+	if err != nil {
+		return WrapVfsError(err)
+	}
+	return FileData(c, http.StatusOK, newdoc, false, nil)
 }
 
 // ModifyMetadataByIDHandler handles PATCH requests on /files/:file-id
@@ -863,7 +924,16 @@ func ReadFileContentFromIDHandler(c echo.Context) error {
 	if c.QueryParam("Dl") == "1" {
 		disposition = "attachment"
 	}
-	err = vfs.ServeFileContent(instance.VFS(), doc, nil, "", disposition, c.Request(), c.Response())
+
+	if page := c.QueryParam("Page"); page != "" {
+		p, errp := strconv.Atoi(page)
+		if errp != nil {
+			return jsonapi.InvalidParameter("Page", errp)
+		}
+		err = vfs.ServePDFPage(instance.VFS(), doc, disposition, p, c.Request(), c.Response())
+	} else {
+		err = vfs.ServeFileContent(instance.VFS(), doc, nil, "", disposition, c.Request(), c.Response())
+	}
 	if err != nil {
 		return WrapVfsError(err)
 	}
@@ -1063,7 +1133,9 @@ func sendFileFromPath(c echo.Context, path string, checkPermission bool) error {
 	}
 
 	// Forbid extracting autofilled passwords on an HTML page hosted in the Cozy
-	middlewares.AppendCSPRule(c, "form-action", "'none'")
+	if !config.GetConfig().CSPDisabled {
+		middlewares.AppendCSPRule(c, "form-action", "'none'")
+	}
 
 	disposition := "inline"
 	if c.QueryParam("Dl") == "1" {
@@ -1071,7 +1143,16 @@ func sendFileFromPath(c echo.Context, path string, checkPermission bool) error {
 	} else if !checkPermission {
 		addCSPRuleForDirectLink(c, doc.Class, doc.Mime)
 	}
-	err = vfs.ServeFileContent(instance.VFS(), doc, nil, "", disposition, c.Request(), c.Response())
+
+	if page := c.QueryParam("Page"); page != "" {
+		p, errp := strconv.Atoi(page)
+		if errp != nil {
+			return jsonapi.InvalidParameter("Page", errp)
+		}
+		err = vfs.ServePDFPage(instance.VFS(), doc, disposition, p, c.Request(), c.Response())
+	} else {
+		err = vfs.ServeFileContent(instance.VFS(), doc, nil, "", disposition, c.Request(), c.Response())
+	}
 	if err != nil {
 		return WrapVfsError(err)
 	}
@@ -1080,6 +1161,9 @@ func sendFileFromPath(c echo.Context, path string, checkPermission bool) error {
 }
 
 func addCSPRuleForDirectLink(c echo.Context, class, mime string) {
+	if config.GetConfig().CSPDisabled {
+		return
+	}
 	// Allow some files to be displayed by the browser in the client-side apps
 	if mime == "text/plain" || class == "image" || class == "audio" || class == "video" || mime == "application/pdf" {
 		middlewares.AppendCSPRule(c, "frame-ancestors", "*")
@@ -1100,7 +1184,7 @@ func ArchiveDownloadCreateHandler(c echo.Context) error {
 	if _, err := jsonapi.Bind(c.Request().Body, archive); err != nil {
 		return err
 	}
-	if len(archive.Files) == 0 && len(archive.IDs) == 0 {
+	if len(archive.Files) == 0 && len(archive.IDs) == 0 && len(archive.Pages) == 0 {
 		return c.JSON(http.StatusBadRequest, "Can't create an archive with no files")
 	}
 	if strings.Contains(archive.Name, "/") {
@@ -1440,6 +1524,46 @@ func DestroyFileHandler(c echo.Context) error {
 	return c.NoContent(204)
 }
 
+// GetAllDocs is the handler for POST /files/_all_docs
+func GetAllDocs(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	if err := middlewares.AllowWholeType(c, permission.GET, consts.Files); err != nil {
+		return err
+	}
+	var allDocsReq struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.NewDecoder(c.Request().Body).Decode(&allDocsReq); err != nil {
+		return jsonapi.Errorf(http.StatusBadRequest, "%s", err)
+	}
+
+	req := &couchdb.AllDocsRequest{Keys: allDocsReq.Keys}
+	var results []vfs.DirOrFileDoc
+	if err := couchdb.GetAllDocs(inst, consts.Files, req, &results); err != nil {
+		return err
+	}
+
+	out := make([]jsonapi.Object, 0)
+	fp := vfs.NewFilePatherWithCache(inst.VFS())
+	for _, result := range results {
+		if result.DirDoc == nil {
+			continue
+		}
+		if result.ID() == consts.TrashDirID {
+			continue
+		}
+		d, f := result.Refine()
+		if d != nil {
+			out = append(out, newDir(d))
+		} else {
+			file := NewFile(f, inst)
+			file.IncludePath(fp)
+			out = append(out, file)
+		}
+	}
+	return jsonapi.DataList(c, http.StatusOK, out, nil)
+}
+
 // FindFilesMango is the route POST /files/_find
 // used to retrieve files and their metadata from a mango query.
 func FindFilesMango(c echo.Context) error {
@@ -1462,7 +1586,10 @@ func FindFilesMango(c echo.Context) error {
 		for _, v := range reqFields {
 			v := v.(string)
 			if v == "path" {
+				// path is not stored in database, but added by the stack, and
+				// it requires the dir_id
 				includePath = true
+				fields = append(fields, "dir_id")
 			}
 			fields = append(fields, v)
 		}
@@ -1552,6 +1679,9 @@ func FindFilesMango(c echo.Context) error {
 		} else {
 			if ok {
 				file := newFindFile(f, fields, instance)
+				if includePath {
+					file.IncludePath(fp)
+				}
 				if secret, ok := secrets[f.ID()]; ok {
 					file.SetThumbSecret(secret)
 				}
@@ -1653,9 +1783,13 @@ func ChangesFeed(c echo.Context) error {
 	}
 
 	filter.Reject(results)
-	filter.AddPathIfAsked(inst, results)
-
-	return c.JSON(http.StatusOK, results)
+	c.Response().Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	c.Response().WriteHeader(http.StatusOK)
+	if err := filter.Stream(c.Response(), inst, results); err != nil {
+		inst.Logger().WithNamespace("files").Warnf("error on _changes: %s", err)
+		return err
+	}
+	return nil
 }
 
 type changesFilter struct {
@@ -1708,14 +1842,19 @@ func (filter *changesFilter) Reject(results *couchdb.ChangesResponse) {
 	results.Results = changes
 }
 
-func (filter *changesFilter) AddPathIfAsked(inst *instance.Instance, results *couchdb.ChangesResponse) {
-	if !filter.IncludePath {
-		return
+func (filter *changesFilter) Stream(
+	w io.Writer,
+	inst *instance.Instance,
+	results *couchdb.ChangesResponse,
+) error {
+	first := fmt.Sprintf(`{"last_seq": %q, "pending": %d, "results": [`, results.LastSeq, results.Pending)
+	if _, err := w.Write([]byte(first)); err != nil {
+		return err
 	}
 
 	fp := vfs.NewFilePatherWithCache(inst.VFS())
-	for _, result := range results.Results {
-		if result.Doc.M != nil && result.Doc.M["type"] == "file" {
+	for i, result := range results.Results {
+		if filter.IncludePath && result.Doc.M != nil && result.Doc.M["type"] == "file" {
 			dirID, _ := result.Doc.M["dir_id"].(string)
 			name, _ := result.Doc.M["name"].(string)
 			doc := &vfs.FileDoc{DirID: dirID, DocName: name}
@@ -1723,7 +1862,20 @@ func (filter *changesFilter) AddPathIfAsked(inst *instance.Instance, results *co
 				result.Doc.M["path"] = pth
 			}
 		}
+		buf, err := json.Marshal(&result)
+		if err != nil {
+			return err
+		}
+		if i != len(results.Results)-1 {
+			buf = append(buf, ',')
+		}
+		if _, err := w.Write(buf); err != nil {
+			return err
+		}
 	}
+
+	_, err := w.Write([]byte("]}"))
+	return err
 }
 
 func (filter *changesFilter) Body() []byte {
@@ -1826,6 +1978,7 @@ func Routes(router *echo.Group) {
 	router.POST("/:file-id/versions", CopyVersionHandler)
 	router.DELETE("/versions", ClearOldVersions)
 
+	router.POST("/_all_docs", GetAllDocs)
 	router.POST("/_find", FindFilesMango)
 	router.GET("/_changes", ChangesFeed)
 
@@ -1839,7 +1992,9 @@ func Routes(router *echo.Group) {
 	router.PATCH("/metadata", ModifyMetadataByPathHandler)
 	router.PATCH("/:file-id", ModifyMetadataByIDHandler)
 	router.PATCH("/", ModifyMetadataByIDInBatchHandler)
+	router.POST("/:file-id/description", AddDescription)
 
+	router.POST("/shared-drives", SharedDrivesCreationHandler)
 	router.POST("/", CreationHandler)
 	router.POST("/:file-id", CreationHandler)
 	router.PUT("/:file-id", OverwriteFileContentHandler)
@@ -1918,10 +2073,12 @@ func wrapVfsError(err error) *jsonapi.Error {
 	case vfs.ErrFileInTrash, vfs.ErrNonAbsolutePath,
 		vfs.ErrDirNotEmpty:
 		return jsonapi.BadRequest(err)
-	case vfs.ErrFileTooBig:
+	case vfs.ErrFileTooBig, vfs.ErrMaxFileSize:
 		return jsonapi.Errorf(http.StatusRequestEntityTooLarge, "%s", err)
 	case vfs.ErrWrongToken:
 		return jsonapi.BadRequest(err)
+	case vfs.ErrInvalidMetadataID:
+		return jsonapi.InvalidParameter("MetadataID", err)
 	}
 	if _, ok := err.(*jsonapi.Error); !ok {
 		logger.WithNamespace("files").Warnf("Not wrapped error: %s", err)
@@ -1960,23 +2117,13 @@ func FileDocFromReq(c echo.Context, name, dirID string) (*vfs.FileDoc, error) {
 
 	var mime, class string
 	contentType := header.Get(echo.HeaderContentType)
-	if contentType == "" {
+	if contentType == "" || contentType == echo.MIMEOctetStream {
 		mime, class = vfs.ExtractMimeAndClassFromFilename(name)
 	} else {
 		ext := strings.ToLower(path.Ext(name))
 		// Force the mime-type for .url files
 		if ext == ".url" {
 			contentType = consts.ShortcutMimeType
-		}
-		// Some browsers may use Mime-Type sniffing and they may sent an
-		// inaccurate Content-Type.
-		if contentType == echo.MIMEOctetStream {
-			switch ext {
-			case ".heif":
-				contentType = "image/heif"
-			case ".heic":
-				contentType = "image/heic"
-			}
 		}
 		if contentType == "text/xml" && ext == "svg" {
 			contentType = "image/svg+xml"
@@ -2168,6 +2315,11 @@ func updateFileCozyMetadata(c echo.Context, file *vfs.FileDoc, setUploadFields b
 		if len(fcm.UpdatedByApps) > 0 {
 			file.CozyMetadata.UpdatedByApp(fcm.UpdatedByApps[0])
 		}
+		if setUploadFields {
+			file.CozyMetadata.UploadedAt = fcm.UploadedAt
+			file.CozyMetadata.UploadedBy = fcm.UploadedBy
+			file.CozyMetadata.UploadedOn = fcm.UploadedOn
+		}
 	}
 
 	if setUploadFields {
@@ -2195,7 +2347,7 @@ func CozyMetadataFromClaims(c echo.Context, setUploadFields bool) (*vfs.FilesCoz
 	var client map[string]string
 	if claims := c.Get("claims"); claims != nil {
 		cl := claims.(permission.Claims)
-		switch cl.Audience {
+		switch cl.AudienceString() {
 		case consts.AppAudience, consts.KonnectorAudience:
 			slug = cl.Subject
 		case consts.AccessTokenAudience:
@@ -2207,6 +2359,10 @@ func CozyMetadataFromClaims(c echo.Context, setUploadFields bool) (*vfs.FilesCoz
 					// in cozyMetadata its changes, so we use a fake slug.
 					if slug == "" && strings.Contains(cli.SoftwareID, "cozy-desktop") {
 						slug = "cozy-desktop"
+					}
+					// Special case for the flagship app
+					if slug == "" && cli.Flagship {
+						slug = "cozy-flagship"
 					}
 					version = cli.SoftwareVersion
 					client = map[string]string{

@@ -24,11 +24,11 @@ func TestUser(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	config.GetConfig().Assets = "../../assets"
 	setup := testutils.NewSetup(t, t.Name())
 
-	require.NoError(t, setup.SetupSwiftTest(), "Could not init Swift test")
+	setup.SetupSwiftTest()
 	require.NoError(t, dynamic.InitDynamicAssetFS(config.FsURL().String()), "Could not init dynamic FS")
 
 	require.NoError(t, web.SetupAssets(echo.New(), config.GetConfig().Assets))

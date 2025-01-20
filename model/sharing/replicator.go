@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -32,8 +33,9 @@ const MaxRetries = 5
 // (each next retry will wait 4 times longer than its previous retry)
 const InitialBackoffPeriod = 1 * time.Minute
 
-// BatchSize is the maximal number of documents mainpulated at once by the replicator
-const BatchSize = 100
+// BatchSize is the maximal number of documents manipulated at once by the
+// replicator
+const BatchSize = 400
 
 // ReplicateMsg is used for jobs on the share-replicate worker.
 type ReplicateMsg struct {
@@ -61,6 +63,11 @@ func (s *Sharing) Replicate(inst *instance.Instance, errors int) error {
 			}
 			m := &s.Members[i]
 			g.Go(func() error {
+				defer func() {
+					if r := recover(); r != nil {
+						inst.Logger().Errorf("[panic] %v: %s", r, debug.Stack())
+					}
+				}()
 				if m.Status == MemberStatusReady {
 					p, err := s.ReplicateTo(inst, m, false)
 					if err != nil {
@@ -140,6 +147,19 @@ func (s *Sharing) retryWorker(inst *instance.Instance, worker string, errors int
 		inst.Logger().WithNamespace("replicator").
 			Warnf("Error on retry to %s: %s", worker, err)
 	}
+}
+
+func (s *Sharing) InitialReplication(inst *instance.Instance, m *Member) error {
+	for i := 0; i < 1000; i++ {
+		pending, err := s.ReplicateTo(inst, m, true)
+		if err != nil {
+			return err
+		}
+		if !pending {
+			return nil
+		}
+	}
+	return ErrInternalServerError
 }
 
 // ReplicateTo starts a replicator on this sharing to the given member.

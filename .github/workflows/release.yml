@@ -2,32 +2,109 @@ name: Create releases
 on:
   push:
     tags:
-    - '*.*.*' # Matching a version number like 1.4.19
+      - "*.*.*" # Matching a version number like 1.4.19
 jobs:
-  publish_on_release:
-    runs-on: ubuntu-20.04
+  create_release:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Install Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.20.x'
-      - name: Check code
-        uses: actions/checkout@v3
-      - name: Build the binaries
-        run: |
-          GOOS=linux   GOARCH=amd64 ./scripts/build.sh release
-          GOOS=linux   GOARCH=arm   ./scripts/build.sh release
-          GOOS=freebsd GOARCH=amd64 ./scripts/build.sh release
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Create the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag_name="${GITHUB_REF##*/}"
-          gh release create "$tag_name" cozy-stack-* --target "$GITHUB_SHA"
+          gh release create "$tag_name" --target "$GITHUB_SHA"  --title "$tag_name" --notes "Release $tag_name"
+  publish_binaries:
+    runs-on: ubuntu-22.04
+    needs: create_release
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build the binaries
+        run: |
+          GOOS=linux   GOARCH=amd64 ./scripts/build.sh release
+          GOOS=linux   GOARCH=arm   ./scripts/build.sh release
+          GOOS=linux   GOARCH=arm64 ./scripts/build.sh release
+          GOOS=freebsd GOARCH=amd64 ./scripts/build.sh release
+      - name: Upload binaries to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${GITHUB_REF##*/}"
+          gh release upload "$tag_name" cozy-stack-*
+  publish_cozy-stack_image:
+    runs-on: ubuntu-22.04
+    needs: create_release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_SECRET }}
+      - name: Build and publish the cozy-stack image
+        run: scripts/docker/production/release.sh
+  publish_cozy-app-dev_image:
+    runs-on: ubuntu-22.04
+    needs: create_release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_SECRET }}
       - name: Build and publish the cozy-app-dev image
-        run: scripts/release.sh
+        run: scripts/docker/cozy-app-dev/release.sh
+  publish_deb_packages:
+    strategy:
+      matrix:
+        os:
+          [
+            "debian:10",
+            "debian:11",
+            "debian:12",
+            "ubuntu:20.04",
+            "ubuntu:22.04",
+            "ubuntu:24.04",
+          ]
+    runs-on: ubuntu-latest
+    needs: create_release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build package
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.os }}
+          options: -v ${{ github.workspace }}:/build -e GOVERSION=1.23.0
+          run: |
+            echo "[safe]" > /root/.gitconfig
+            echo "        directory = /build" >> /root/.gitconfig
+            cd /build
+            scripts/packaging/installrequirements.sh
+            scripts/packaging/buildpackage.sh
+      - name: Upload package to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${GITHUB_REF##*/}"
+          gh release upload "$tag_name" packages/*.deb
+  update_repo:
+    runs-on: ubuntu-latest
+    needs: publish_deb_packages
+    steps:
+      - name: Update deb repo
+        env:
+          JENKINS_AUTH: ${{ secrets.JENKINS_AUTH }}
+          JENKINS_REPO_PUBLISH_JOB: ${{ secrets.JENKINS_REPO_PUBLISH_JOB }}
+          JENKINS_REPO_PUBLISH_TOKEN: ${{ secrets.JENKINS_REPO_PUBLISH_TOKEN }}
+        run: |
+          curl -fsSL --user ${JENKINS_AUTH} https://ci.cozycloud.cc/job/${JENKINS_REPO_PUBLISH_JOB}/buildWithParameters?token=${JENKINS_REPO_PUBLISH_TOKEN} -d "FORCE=false"

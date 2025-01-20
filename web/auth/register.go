@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/cozy/cozy-stack/model/oauth"
-	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -29,8 +28,7 @@ func registerClient(c echo.Context) error {
 	// We do not allow the creation of clients allowed to have an empty scope
 	// ("login" scope), except via the CLI.
 	if client.AllowLoginScope {
-		perm, err := middlewares.GetPermission(c)
-		if err != nil || perm.Type != permission.TypeCLI {
+		if _, ok := middlewares.GetCLIPermission(c); !ok {
 			return echo.NewHTTPError(http.StatusUnauthorized,
 				"Not authorized to create client with given parameters")
 		}
@@ -53,11 +51,26 @@ func updateClient(c echo.Context) error {
 	if limits.IsLimitReachedOrExceeded(err) {
 		return echo.NewHTTPError(http.StatusNotFound, "Not found")
 	}
+
+	clientID := c.Param("client-id")
+	defer LockOAuthClient(instance, clientID)()
+
+	oldClient, err := oauth.FindClient(instance, clientID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, echo.Map{
+			"error": "Client not found",
+		})
+	}
+	if err := checkClientToken(c, oldClient); err != nil {
+		return c.JSON(http.StatusUnauthorized, echo.Map{
+			"error": err.Error(),
+		})
+	}
+
 	client := new(oauth.Client)
 	if err := json.NewDecoder(c.Request().Body).Decode(client); err != nil {
 		return err
 	}
-	oldClient := c.Get("client").(*oauth.Client)
 	if err := client.Update(instance, oldClient); err != nil {
 		return c.JSON(err.Code, err)
 	}
@@ -66,7 +79,10 @@ func updateClient(c echo.Context) error {
 
 func deleteClient(c echo.Context) error {
 	instance := middlewares.GetInstance(c)
-	client, err := oauth.FindClient(instance, c.Param("client-id"))
+	clientID := c.Param("client-id")
+	defer LockOAuthClient(instance, clientID)()
+
+	client, err := oauth.FindClient(instance, clientID)
 	if err != nil {
 		if couchdb.IsNotFoundError(err) {
 			return c.NoContent(http.StatusNoContent)

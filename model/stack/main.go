@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
+	"github.com/cozy/cozy-stack/model/cloudery"
+	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/model/session"
+	"github.com/cozy/cozy-stack/model/settings"
+	"github.com/cozy/cozy-stack/model/token"
 	"github.com/cozy/cozy-stack/pkg/assets/dynamic"
 	build "github.com/cozy/cozy-stack/pkg/config"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
+	"github.com/cozy/cozy-stack/pkg/emailer"
 	"github.com/cozy/cozy-stack/pkg/utils"
 
 	"github.com/google/gops/agent"
-	"github.com/sirupsen/logrus"
 )
 
 // Options can be used to give options when starting the stack.
@@ -46,8 +49,13 @@ func (g gopAgent) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+type Services struct {
+	Emailer  emailer.Emailer
+	Settings settings.Service
+}
+
 // Start is used to initialize all the
-func Start(opts ...Options) (processes utils.Shutdowner, err error) {
+func Start(opts ...Options) (utils.Shutdowner, *Services, error) {
 	if build.IsDevRelease() {
 		fmt.Print(`                           !! DEVELOPMENT RELEASE !!
 You are running a development release which may deactivate some very important
@@ -61,65 +69,58 @@ security features. Please do not use this binary as your production server.
 	ctx := context.Background()
 
 	if !hasOptions(NoGops, opts) {
-		err = agent.Listen(agent.Options{})
+		err := agent.Listen(agent.Options{})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error on gops agent: %s\n", err)
 		}
 		shutdowners = append(shutdowners, gopAgent{})
 	}
 
-	// Check that we can properly reach CouchDB.
-	attempts := 8
-	attemptsSpacing := 1 * time.Second
-	for i := 0; i < attempts; i++ {
-		_, err = couchdb.CheckStatus(ctx)
-		if err == nil {
-			break
-		}
-		err = fmt.Errorf("could not reach Couchdb database: %s", err.Error())
-		if i < attempts-1 {
-			logrus.Warnf("%s, retrying in %v", err, attemptsSpacing)
-			time.Sleep(attemptsSpacing)
-		}
-	}
-	if err != nil {
-		return
-	}
-	if err = couchdb.InitGlobalDB(); err != nil {
-		return
+	if err := couchdb.InitGlobalDB(ctx); err != nil {
+		return nil, nil, fmt.Errorf("failed to init the global db: %w", err)
 	}
 
 	// Init the main global connection to the swift server
-	if err = config.InitDefaultSwiftConnection(); err != nil {
-		return
+	if err := config.InitDefaultSwiftConnection(); err != nil {
+		return nil, nil, fmt.Errorf("failed to init the swift connection: %w", err)
 	}
 
 	workersList, err := job.GetWorkersList()
 	if err != nil {
-		return
+		return nil, nil, fmt.Errorf("failed to get the workers list: %w", err)
 	}
 
 	var broker job.Broker
 	var schder job.Scheduler
 	jobsConfig := config.GetConfig().Jobs
-	if cli := jobsConfig.Client(); cli != nil {
-		broker = job.NewRedisBroker(cli)
-		schder = job.NewRedisScheduler(cli)
+	if jobsConfig.Client != nil {
+		broker = job.NewRedisBroker(jobsConfig.Client)
+		schder = job.NewRedisScheduler(jobsConfig.Client)
 	} else {
 		broker = job.NewMemBroker()
 		schder = job.NewMemScheduler()
 	}
 
 	if err = job.SystemStart(broker, schder, workersList); err != nil {
-		return
+		return nil, nil, fmt.Errorf("failed to start the jobs: %w", err)
 	}
 	shutdowners = append(shutdowners, job.System())
+
+	tokenSvc := token.NewService(config.GetConfig().CacheStorage)
+	emailerSvc := emailer.Init()
+	instanceSvc := instance.Init()
+	clouderySvc := cloudery.Init(config.GetConfig().Clouderies)
+
+	services := Services{
+		Emailer:  emailerSvc,
+		Settings: settings.Init(emailerSvc, instanceSvc, tokenSvc, clouderySvc),
+	}
 
 	// Initialize the dynamic assets FS. Can be OsFs, MemFs or Swift
 	if !hasOptions(NoDynAssets, opts) {
 		err = dynamic.InitDynamicAssetFS(config.FsURL().String())
 		if err != nil {
-			return nil, err
+			return nil, nil, fmt.Errorf("failed to init the dynamic asset fs: %w", err)
 		}
 	}
 
@@ -127,6 +128,7 @@ security features. Please do not use this binary as your production server.
 	shutdowners = append(shutdowners, sessionSweeper)
 
 	// Global shutdowner that composes all the running processes of the stack
-	processes = utils.NewGroupShutdown(shutdowners...)
-	return
+	processes := utils.NewGroupShutdown(shutdowners...)
+
+	return processes, &services, nil
 }

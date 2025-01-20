@@ -12,11 +12,10 @@ import (
 	"github.com/cozy/cozy-stack/client/request"
 	build "github.com/cozy/cozy-stack/pkg/config"
 	"github.com/cozy/cozy-stack/pkg/config/config"
-	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/tlsclient"
-	"github.com/howeyc/gopass"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 )
 
 // DefaultStorageDir is the default directory name in which data
@@ -57,32 +56,7 @@ func newClientSafe(domain string, scopes ...string) (*client.Client, error) {
 	// We may want in the future rely on OAuth to handle the permissions with
 	// more granularity.
 	ac := newAdminClient()
-	token, err := ac.GetToken(&client.TokenOptions{
-		Domain:   domain,
-		Subject:  "CLI",
-		Audience: consts.CLIAudience,
-		Scope:    scopes,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	httpClient, clientURL, err := tlsclient.NewHTTPClient(tlsclient.HTTPEndpoint{
-		Host:      config.GetConfig().Host,
-		Port:      config.GetConfig().Port,
-		Timeout:   15 * time.Minute,
-		EnvPrefix: "COZY_HOST",
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &client.Client{
-		Scheme:     clientURL.Scheme,
-		Addr:       clientURL.Host,
-		Domain:     domain,
-		Client:     httpClient,
-		Authorizer: &request.BearerAuthorizer{Token: token},
-	}, nil
+	return ac.NewInstanceClient(domain, scopes...)
 }
 
 func newClient(domain string, scopes ...string) *client.Client {
@@ -96,12 +70,16 @@ func newClient(domain string, scopes ...string) *client.Client {
 }
 
 func newAdminClient() *client.AdminClient {
-	pass := []byte(os.Getenv("COZY_ADMIN_PASSWORD"))
+	pass := []byte(os.Getenv("COZY_ADMIN_PASSPHRASE"))
+	if len(pass) == 0 {
+		pass = []byte(os.Getenv("COZY_ADMIN_PASSWORD"))
+	}
 	if !build.IsDevRelease() {
 		if len(pass) == 0 {
 			var err error
-			fmt.Printf("Password:")
-			pass, err = gopass.GetPasswdMasked()
+			fmt.Fprintf(os.Stdout, "Password:")
+			pass, err = term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stdout, "")
 			if err != nil {
 				errFatalf("Could not get password from standard input: %s\n", err)
 			}

@@ -24,6 +24,7 @@ type memScheduler struct {
 
 	ts    map[string]Trigger
 	thumb *ThumbnailTrigger
+	share *ShareGroupTrigger
 	mu    sync.RWMutex
 	log   *logger.Entry
 }
@@ -51,13 +52,15 @@ func (s *memScheduler) StartScheduler(b Broker) error {
 
 	s.thumb = NewThumbnailTrigger(s.broker)
 	go s.thumb.Schedule()
+	s.share = NewShareGroupTrigger(s.broker)
+	go s.share.Schedule()
 
 	// XXX The memory scheduler loads the triggers from CouchDB when the stack
-	// is started. This can cause some stability issues when running
-	// integration tests in parallel. To avoid that, an env variable
+	// is started. This can cause some stability issues when running system
+	// tests in parallel. To avoid that, an env variable
 	// COZY_SKIP_LOADING_TRIGGERS can be set to skip loading the triggers from
-	// CouchDB. It is correct for integration tests, as instances are created
-	// and destroyed by the same process. But, it should not be used elsewhere.
+	// CouchDB. It is correct for system tests, as instances are created and
+	// destroyed by the same process. But, it should not be used elsewhere.
 	for _, env := range os.Environ() {
 		if strings.HasPrefix(env, "COZY_SKIP_LOADING_TRIGGERS=") {
 			return nil
@@ -117,6 +120,7 @@ func (s *memScheduler) ShutdownScheduler(ctx context.Context) error {
 		t.Unschedule()
 	}
 	s.thumb.Unschedule()
+	s.share.Unschedule()
 	fmt.Println("ok.")
 	return nil
 }
@@ -143,6 +147,15 @@ func (s *memScheduler) GetTrigger(db prefixer.Prefixer, id string) (Trigger, err
 		return nil, ErrNotFoundTrigger
 	}
 	return t, nil
+}
+
+// UpdateMessage changes the message for the given trigger.
+func (s *memScheduler) UpdateMessage(db prefixer.Prefixer, trigger Trigger, message json.RawMessage) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	infos := trigger.Infos()
+	infos.Message = Message(message)
+	return couchdb.UpdateDoc(db, infos)
 }
 
 // UpdateCron will change the frequency of execution for the given trigger.

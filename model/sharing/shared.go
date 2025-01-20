@@ -301,6 +301,11 @@ func updateRemovedForFiles(inst *instance.Instance, sharingID, dirID string, rul
 			rev := file.Rev()
 			if ref.Rev() == "" {
 				ref.Revisions = &RevsTree{Rev: rev}
+			} else if !removed {
+				chain, err := addMissingRevsToChain(inst, &ref, []string{rev})
+				if err == nil {
+					ref.Revisions.InsertChain(chain)
+				}
 			}
 			docs = append(docs, ref)
 		}
@@ -334,12 +339,7 @@ func UpdateShared(inst *instance.Instance, msg TrackMessage, evt TrackEvent) err
 	}
 
 	rev := evt.Doc.Rev()
-	// XXX this optimization only works for files
-	if _, ok := ref.Infos[msg.SharingID]; ok && msg.DocType == consts.Files {
-		if sub, _ := ref.Revisions.Find(rev); sub != nil {
-			return nil
-		}
-	}
+	_, wasTracked := ref.Infos[msg.SharingID]
 
 	// If a document was in a sharing, was removed of the sharing, and comes
 	// back inside it, we need to clear the Removed flag.
@@ -361,6 +361,9 @@ func UpdateShared(inst *instance.Instance, msg TrackMessage, evt TrackEvent) err
 		// Do not create a shared doc for a deleted document: it's useless and
 		// it can have some side effects!
 		if ref.Rev() == "" {
+			return nil
+		}
+		if wasRemoved {
 			return nil
 		}
 		ref.Infos[msg.SharingID] = SharedInfo{
@@ -389,6 +392,13 @@ func UpdateShared(inst *instance.Instance, msg TrackMessage, evt TrackEvent) err
 		}
 		if evt.Doc.Type == consts.Files && evt.Doc.Get("type") == consts.DirType {
 			needToUpdateFiles = removed != wasRemoved
+		}
+	}
+
+	// XXX this optimization only works for files
+	if wasTracked && msg.DocType == consts.Files && !removed {
+		if sub, _ := ref.Revisions.Find(rev); sub != nil {
+			return nil
 		}
 	}
 
@@ -540,6 +550,38 @@ func extractDocReferenceFromID(id string) *couchdb.DocReference {
 	ref.ID = slice[1]
 	ref.Type = slice[0]
 	return &ref
+}
+
+func (s *Sharing) fixMissingShared(inst *instance.Instance, fileDoc *vfs.FileDoc) (SharedRef, error) {
+	var ref SharedRef
+	ref.SID = consts.Files + "/" + fileDoc.ID()
+	ref.Revisions = &RevsTree{Rev: fileDoc.Rev()}
+
+	rule, ruleIndex := s.findRuleForNewFile(fileDoc)
+	if rule == nil {
+		return ref, ErrSafety
+	}
+
+	sharingDir, err := s.GetSharingDir(inst)
+	if err != nil {
+		return ref, err
+	}
+	fs := inst.VFS()
+	pth, err := fileDoc.Path(fs)
+	if err != nil || !strings.HasPrefix(pth, sharingDir.Fullpath+"/") {
+		return ref, ErrSafety
+	}
+
+	ref.Infos = map[string]SharedInfo{
+		s.SID: {
+			Rule:    ruleIndex,
+			Binary:  true,
+			Removed: false,
+		},
+	}
+
+	err = couchdb.CreateNamedDoc(inst, &ref)
+	return ref, err
 }
 
 // CheckShared will scan all the io.cozy.shared documents and check their

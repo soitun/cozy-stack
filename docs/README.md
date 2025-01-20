@@ -37,6 +37,7 @@ Feel free to [open an issue](https://github.com/cozy/cozy-stack/issues/new) for 
 
 -   [Using the HTTP API of cozy-stack](http-api.md)
 -   [Develop a client-side app](client-app-dev.md)
+-   [Develop a konnector](konnectors-dev.md)
 -   [Running and building Docker images](docker.md)
 -   [Adding a new doctype](doctype.md)
 -   [Working with the stack assets](assets.md)
@@ -71,6 +72,7 @@ designing new services.
 
 ### List of services
 
+-   `/ai` - [AI](ai.md)
 -   `/auth` - [Authentication & OAuth](auth.md)
     -   [Delegated authentication](delegated-auth.md)
 -   `/apps` - [Applications Management](apps.md)
@@ -97,6 +99,7 @@ designing new services.
 -   `/public` - [Public](public.md)
 -   `/realtime` - [Realtime](realtime.md)
 -   `/remote` - [Proxy for remote data/API](remote.md)
+    -   [NextCloud](nextcloud.md)
 -   `/settings` - [Settings](settings.md)
     -   [Terms of Services](user-action-required.md)
 -   `/sharings` - [Sharing](sharing.md)

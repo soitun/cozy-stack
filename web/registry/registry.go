@@ -137,7 +137,7 @@ func proxyMaintenanceReq(c echo.Context) error {
 	if pdoc.Type != permission.TypeWebapp && pdoc.Type != permission.TypeOauth {
 		return echo.NewHTTPError(http.StatusForbidden)
 	}
-	apps, err := registry.ProxyMaintenance(i.Registries())
+	apps, err := registry.ListMaintenance(i.Registries())
 	if err != nil {
 		return err
 	}
@@ -149,8 +149,12 @@ func proxyMaintenanceReq(c echo.Context) error {
 	for _, item := range maintenance {
 		list = append(list, item)
 	}
-	for _, item := range apps {
-		list = append(list, item)
+	for _, doc := range apps {
+		item, err := doc.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		list = append(list, json.RawMessage(item))
 	}
 	return c.JSON(http.StatusOK, list)
 }

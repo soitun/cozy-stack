@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
+	"github.com/cozy/cozy-stack/model/stack"
 	build "github.com/cozy/cozy-stack/pkg/config"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/pkg/metrics"
 	"github.com/cozy/cozy-stack/web/accounts"
+	"github.com/cozy/cozy-stack/web/ai"
 	"github.com/cozy/cozy-stack/web/apps"
 	"github.com/cozy/cozy-stack/web/auth"
 	"github.com/cozy/cozy-stack/web/bitwarden"
@@ -168,7 +170,7 @@ func SetupAssets(router *echo.Echo, assetsPath string) (err error) {
 }
 
 // SetupRoutes sets the routing for HTTP endpoints
-func SetupRoutes(router *echo.Echo) error {
+func SetupRoutes(router *echo.Echo, services *stack.Services) error {
 	router.Use(timersMiddleware)
 
 	if !config.GetConfig().CSPDisabled {
@@ -216,13 +218,14 @@ func SetupRoutes(router *echo.Echo) error {
 		}
 		mws := append(mwsNotBlocked,
 			middlewares.CheckInstanceBlocked,
-			middlewares.CheckTOSDeadlineExpired)
+			middlewares.CheckTOSDeadlineExpired,
+		)
 		registry.Routes(router.Group("/registry", mws...))
 		data.Routes(router.Group("/data", mws...))
 		files.Routes(router.Group("/files", mws...))
 		contacts.Routes(router.Group("/contacts", mws...))
 		intents.Routes(router.Group("/intents", mws...))
-		jobs.Routes(router.Group("/jobs", mws...))
+		jobs.NewHTTPHandler(services.Emailer).Register(router.Group("/jobs", mws...))
 		notifications.Routes(router.Group("/notifications", mws...))
 		move.Routes(router.Group("/move", mws...))
 		permissions.Routes(router.Group("/permissions", mws...))
@@ -233,11 +236,15 @@ func SetupRoutes(router *echo.Echo) error {
 		sharings.Routes(router.Group("/sharings", mws...))
 		bitwarden.Routes(router.Group("/bitwarden", mws...))
 		shortcuts.Routes(router.Group("/shortcuts", mws...))
+		ai.Routes(router.Group("/ai", mws...))
 
 		// The settings routes needs not to be blocked
 		apps.WebappsRoutes(router.Group("/apps", mwsNotBlocked...))
 		apps.KonnectorRoutes(router.Group("/konnectors", mwsNotBlocked...))
-		settings.Routes(router.Group("/settings", mwsNotBlocked...))
+
+		// TODO: An init refacto will soon be required
+		settings.NewHTTPHandler(services.Settings).Register(router.Group("/settings", mwsNotBlocked...))
+
 		compat.Routes(router.Group("/compat", mwsNotBlocked...))
 
 		// Careful, the normal middlewares NeedInstance and LoadSession are not
@@ -298,6 +305,7 @@ func SetupAdminRoutes(router *echo.Echo) error {
 	realtime.Routes(router.Group("/realtime", mws...))
 	swift.Routes(router.Group("/swift", mws...))
 	tools.Routes(router.Group("/tools", mws...))
+	conncheck.Routes(router.Group("/connection_check", mws...))
 
 	setupRecover(router)
 
@@ -308,12 +316,12 @@ func SetupAdminRoutes(router *echo.Echo) error {
 // CreateSubdomainProxy returns a new web server that will handle that apps
 // proxy routing if the host of the request match an application, and route to
 // the given router otherwise.
-func CreateSubdomainProxy(router *echo.Echo, appsHandler echo.HandlerFunc) (*echo.Echo, error) {
+func CreateSubdomainProxy(router *echo.Echo, services *stack.Services, appsHandler echo.HandlerFunc) (*echo.Echo, error) {
 	if err := SetupAssets(router, config.GetConfig().Assets); err != nil {
 		return nil, err
 	}
 
-	if err := SetupRoutes(router); err != nil {
+	if err := SetupRoutes(router, services); err != nil {
 		return nil, err
 	}
 

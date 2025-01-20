@@ -16,18 +16,19 @@ import (
 
 	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
+	"github.com/cozy/cozy-stack/model/feature"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/move"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/session"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/model/sharing"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/pkg/limits"
 	"github.com/cozy/cozy-stack/pkg/registry"
 	"github.com/cozy/cozy-stack/web/middlewares"
@@ -51,6 +52,27 @@ type authorizeParams struct {
 	challengeMethod string
 	client          *oauth.Client
 	webapp          *webappParams
+}
+
+type AuthorizeHTTPHandler struct {
+	deprecatedApps *DeprecatedAppList
+}
+
+// NewAuthorizeHandler instantiates a new [AuthHTTPHandler].
+func NewAuthorizeHandler(deprecatedAppsCfg config.DeprecatedAppsCfg) *AuthorizeHTTPHandler {
+	return &AuthorizeHTTPHandler{
+		deprecatedApps: NewDeprecatedAppList(deprecatedAppsCfg),
+	}
+}
+
+func (a *AuthorizeHTTPHandler) Register(router *echo.Group) {
+	router.GET("", a.authorizeForm)
+	router.POST("", a.authorize)
+	router.GET("/sharing", a.authorizeSharingForm)
+	router.POST("/sharing", a.authorizeSharing)
+	router.GET("/sharing/:sharing-id/cancel", a.cancelAuthorizeSharing)
+	router.GET("/move", a.authorizeMoveForm)
+	router.POST("/move", a.authorizeMove)
 }
 
 func checkAuthorizeParams(c echo.Context, params *authorizeParams) (bool, error) {
@@ -141,10 +163,10 @@ func checkAuthorizeParams(c echo.Context, params *authorizeParams) (bool, error)
 	return false, nil
 }
 
-func authorizeForm(c echo.Context) error {
-	instance := middlewares.GetInstance(c)
+func (a *AuthorizeHTTPHandler) authorizeForm(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
 	params := authorizeParams{
-		instance:        instance,
+		instance:        inst,
 		state:           c.QueryParam("state"),
 		clientID:        c.QueryParam("client_id"),
 		redirectURI:     c.QueryParam("redirect_uri"),
@@ -159,12 +181,12 @@ func authorizeForm(c echo.Context) error {
 		// XXX we should always clear the session code to avoid it being
 		// reused, even if the user is already logged in and we don't want to
 		// create a new session
-		if checked := instance.CheckAndClearSessionCode(code); checked && !isLoggedIn {
+		if checked := inst.CheckAndClearSessionCode(code); checked && !isLoggedIn {
 			sessionID, err := SetCookieForNewSession(c, session.ShortRun)
 			req := c.Request()
 			if err == nil {
-				if err = session.StoreNewLoginEntry(instance, sessionID, "", req, "session_code", false); err != nil {
-					instance.Logger().Errorf("Could not store session history %q: %s", sessionID, err)
+				if err = session.StoreNewLoginEntry(inst, sessionID, "", req, "session_code", false); err != nil {
+					inst.Logger().Errorf("Could not store session history %q: %s", sessionID, err)
 				}
 			}
 			redirect := req.URL
@@ -179,9 +201,13 @@ func authorizeForm(c echo.Context) error {
 		return err
 	}
 
+	if a.deprecatedApps.IsDeprecated(params.client) {
+		return c.Render(http.StatusOK, "new_app_available.html", a.deprecatedApps.RenderArgs(params.client, inst, c.Request().UserAgent()))
+	}
+
 	if !isLoggedIn {
-		u := instance.PageURL("/auth/login", url.Values{
-			"redirect": {instance.FromURL(c.Request().URL)},
+		u := inst.PageURL("/auth/login", url.Values{
+			"redirect": {inst.FromURL(c.Request().URL)},
 		})
 		return c.Redirect(http.StatusSeeOther, u)
 	}
@@ -212,9 +238,57 @@ func authorizeForm(c echo.Context) error {
 		return c.Redirect(http.StatusFound, u.String()+"#")
 	}
 
+	if !params.client.Flagship {
+		flags, err := feature.GetFlags(inst)
+		if err != nil {
+			return err
+		}
+
+		if clientsLimit, ok := flags.M["cozy.oauthclients.max"].(float64); ok && clientsLimit >= 0 {
+			limit := int(clientsLimit)
+
+			clients, _, err := oauth.GetConnectedUserClients(inst, 100, "")
+			if err != nil {
+				return fmt.Errorf("Could not get user OAuth clients: %w", err)
+			}
+			count := len(clients)
+
+			if count >= limit {
+				var manageDevicesURL, premiumURL string
+
+				connectedDevicesURL := inst.SubDomain(consts.SettingsSlug)
+				connectedDevicesURL.Fragment = "/connectedDevices"
+				manageDevicesURL = connectedDevicesURL.String()
+
+				if inst.HasPremiumLinksEnabled() {
+					if premiumURL, err = inst.ManagerURL(instance.ManagerPremiumURL); err != nil {
+						inst.Logger().Errorf("Could not get instance Premium Manager URL: %s", err.Error())
+					}
+				}
+
+				sess, _ := middlewares.GetSession(c)
+				settingsToken := inst.BuildAppToken(consts.SettingsSlug, sess.ID())
+
+				return c.Render(http.StatusOK, "oauth_clients_limit_exceeded.html", echo.Map{
+					"Domain":            inst.ContextualDomain(),
+					"ContextName":       inst.ContextName,
+					"Locale":            inst.Locale,
+					"Title":             inst.TemplateTitle(),
+					"Favicon":           middlewares.Favicon(inst),
+					"ClientsCount":      strconv.Itoa(count),
+					"ClientsLimit":      strconv.Itoa(limit),
+					"OpenLinksInNewTab": true,
+					"ManageDevicesURL":  manageDevicesURL,
+					"PremiumURL":        premiumURL,
+					"SettingsToken":     settingsToken,
+				})
+			}
+		}
+	}
+
 	permissions, err := permission.UnmarshalScopeString(params.scope)
 	if err != nil {
-		context := instance.ContextName
+		context := inst.ContextName
 		if context == "" {
 			context = config.DefaultInstanceContext
 		}
@@ -272,15 +346,14 @@ func authorizeForm(c echo.Context) error {
 		}
 	}
 
-	slugname, instanceDomain := instance.SlugAndDomain()
+	slugname, instanceDomain := inst.SlugAndDomain()
 
-	hasFallback := c.QueryParam("fallback_uri") != ""
 	return c.Render(http.StatusOK, "authorize.html", echo.Map{
-		"Domain":           instance.ContextualDomain(),
-		"ContextName":      instance.ContextName,
-		"Locale":           instance.Locale,
-		"Title":            instance.TemplateTitle(),
-		"Favicon":          middlewares.Favicon(instance),
+		"Domain":           inst.ContextualDomain(),
+		"ContextName":      inst.ContextName,
+		"Locale":           inst.Locale,
+		"Title":            inst.TemplateTitle(),
+		"Favicon":          middlewares.Favicon(inst),
 		"InstanceSlugName": slugname,
 		"InstanceDomain":   instanceDomain,
 		"ClientDomain":     clientDomain,
@@ -294,12 +367,11 @@ func authorizeForm(c echo.Context) error {
 		"Permissions":      permissions,
 		"ReadOnly":         readOnly,
 		"CSRF":             c.Get("csrf"),
-		"HasFallback":      hasFallback,
 		"Webapp":           params.webapp,
 	})
 }
 
-func authorize(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) authorize(c echo.Context) error {
 	instance := middlewares.GetInstance(c)
 	params := authorizeParams{
 		instance:        instance,
@@ -364,9 +436,6 @@ func authorize(c echo.Context) error {
 
 func createAccessCode(c echo.Context, params authorizeParams, u *url.URL, q url.Values) error {
 	q.Set("state", params.state)
-	if params.client.OnboardingSecret != "" {
-		q.Set("cozy_url", params.instance.Domain)
-	}
 
 	access, err := oauth.CreateAccessCode(params.instance, params.client, params.scope, params.challenge)
 	if err != nil {
@@ -448,7 +517,7 @@ func checkAuthorizeSharingParams(c echo.Context, params *authorizeSharingParams)
 	return false, nil
 }
 
-func authorizeSharingForm(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) authorizeSharingForm(c echo.Context) error {
 	instance := middlewares.GetInstance(c)
 	params := authorizeSharingParams{
 		instance:  instance,
@@ -472,7 +541,16 @@ func authorizeSharingForm(c echo.Context) error {
 		return renderError(c, http.StatusUnauthorized, "Error Invalid sharing")
 	}
 
-	hasShortcut := s.ShortcutID != ""
+	if strings.ToLower(c.QueryParam("shortcut")) == "true" {
+		if err := s.AddShortcut(instance, params.state); err != nil {
+			return err
+		}
+		u := instance.SubDomain(consts.DriveSlug)
+		u.RawQuery = "sharing=" + s.SID
+		u.Fragment = "/folder/" + consts.SharedWithMeDirID
+		return c.Redirect(http.StatusSeeOther, u.String())
+	}
+
 	var sharerDomain, targetType string
 	sharerURL, err := url.Parse(s.Members[0].Instance)
 	if err != nil {
@@ -482,7 +560,6 @@ func authorizeSharingForm(c echo.Context) error {
 	}
 	if s.Rules[0].DocType == consts.BitwardenOrganizations {
 		targetType = instance.Translate("Notification Sharing Type Organization")
-		hasShortcut = true
 		s.Rules[0].Mime = "organization"
 		if len(s.Rules) == 2 && s.Rules[1].DocType == consts.BitwardenCiphers {
 			s.Rules = s.Rules[:1]
@@ -506,12 +583,11 @@ func authorizeSharingForm(c echo.Context) error {
 		"State":        params.state,
 		"Sharing":      s,
 		"CSRF":         c.Get("csrf"),
-		"HasShortcut":  hasShortcut,
 		"TargetType":   targetType,
 	})
 }
 
-func authorizeSharing(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) authorizeSharing(c echo.Context) error {
 	instance := middlewares.GetInstance(c)
 	params := authorizeSharingParams{
 		instance:  instance,
@@ -535,16 +611,6 @@ func authorizeSharing(c echo.Context) error {
 		return sharing.ErrInvalidSharing
 	}
 
-	if c.FormValue("synchronize") == "" {
-		if err = s.AddShortcut(instance, params.state); err != nil {
-			return err
-		}
-		u := instance.SubDomain(consts.DriveSlug)
-		u.RawQuery = "sharing=" + s.SID
-		u.Fragment = "/folder/" + consts.SharedWithMeDirID
-		return c.Redirect(http.StatusSeeOther, u.String())
-	}
-
 	if !s.Active {
 		if err = s.SendAnswer(instance, params.state); err != nil {
 			return err
@@ -554,7 +620,7 @@ func authorizeSharing(c echo.Context) error {
 	return c.Redirect(http.StatusSeeOther, redirect.String())
 }
 
-func cancelAuthorizeSharing(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) cancelAuthorizeSharing(c echo.Context) error {
 	if !middlewares.IsLoggedIn(c) {
 		return renderError(c, http.StatusUnauthorized, "Error Must be authenticated")
 	}
@@ -572,7 +638,7 @@ func cancelAuthorizeSharing(c echo.Context) error {
 	return c.Redirect(http.StatusSeeOther, previewURL)
 }
 
-func authorizeMoveForm(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) authorizeMoveForm(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 	state := c.QueryParam("state")
 	if state == "" {
@@ -619,7 +685,7 @@ func authorizeMoveForm(c echo.Context) error {
 		})
 	}
 
-	publicName, err := inst.PublicName()
+	publicName, err := csettings.PublicName(inst)
 	if err != nil {
 		publicName = ""
 	}
@@ -654,7 +720,7 @@ func authorizeMoveForm(c echo.Context) error {
 	})
 }
 
-func authorizeMove(c echo.Context) error {
+func (a *AuthorizeHTTPHandler) authorizeMove(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 	if inst.HasForcedOIDC() {
 		if !middlewares.IsLoggedIn(c) {
@@ -687,7 +753,7 @@ func authorizeMove(c echo.Context) error {
 
 	// Check passphrase
 	passphrase := []byte(c.FormValue("passphrase"))
-	if lifecycle.CheckPassphrase(inst, passphrase) != nil {
+	if instance.CheckPassphrase(inst, passphrase) != nil {
 		errorMessage := inst.Translate(CredentialsErrorKey)
 		err := config.GetRateLimiter().CheckRateLimit(inst, limits.AuthType)
 		if limits.IsLimitReachedOrExceeded(err) {
@@ -788,6 +854,12 @@ type AccessTokenReponse struct {
 	Refresh string `json:"refresh_token,omitempty"`
 }
 
+func LockOAuthClient(inst *instance.Instance, clientID string) func() {
+	mu := config.Lock().ReadWrite(inst, "oauth/"+clientID)
+	_ = mu.Lock()
+	return mu.Unlock
+}
+
 func accessToken(c echo.Context) error {
 	grant := c.FormValue("grant_type")
 	clientID := c.FormValue("client_id")
@@ -810,6 +882,7 @@ func accessToken(c echo.Context) error {
 			"error": "the client_secret parameter is mandatory",
 		})
 	}
+	defer LockOAuthClient(instance, clientID)()
 
 	client, err := oauth.FindClient(instance, clientID)
 	if err != nil {
@@ -930,36 +1003,6 @@ func buildKonnectorToken(c echo.Context) error {
 	token := inst.BuildKonnectorToken(slug)
 
 	return c.JSON(http.StatusCreated, token)
-}
-
-// Used to trade a secret for OAuth client informations
-func secretExchange(c echo.Context) error {
-	type exchange struct {
-		Secret string `json:"secret"`
-	}
-	e := new(exchange)
-
-	instance := middlewares.GetInstance(c)
-	err := json.NewDecoder(c.Request().Body).Decode(&e)
-	if err != nil {
-		return jsonapi.Errorf(http.StatusBadRequest, "%s", err)
-	}
-
-	if e.Secret == "" {
-		return jsonapi.BadRequest(errors.New("Missing secret"))
-	}
-
-	doc, err := oauth.FindClientByOnBoardingSecret(instance, e.Secret)
-	if err != nil {
-		return jsonapi.NotFound(err)
-	}
-
-	if doc.OnboardingSecret == "" || doc.OnboardingSecret != e.Secret {
-		return jsonapi.InvalidAttribute("secret", errors.New("Invalid secret"))
-	}
-
-	doc.TransformIDAndRev()
-	return c.JSON(http.StatusOK, doc)
 }
 
 // CheckLinkedAppInstalled checks if a linked webapp has been installed to the

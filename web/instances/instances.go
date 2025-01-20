@@ -1,3 +1,6 @@
+// Package instances is used for the admin endpoint to manage instances. It
+// covers a lot of things, from creating an instance to checking the FS
+// integrity.
 package instances
 
 import (
@@ -12,7 +15,8 @@ import (
 	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
-	"github.com/cozy/cozy-stack/model/job"
+	"github.com/cozy/cozy-stack/model/notification"
+	"github.com/cozy/cozy-stack/model/notification/center"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/session"
 	"github.com/cozy/cozy-stack/model/sharing"
@@ -22,7 +26,6 @@ import (
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/utils"
-	"github.com/cozy/cozy-stack/worker/updates"
 	"github.com/labstack/echo/v4"
 )
 
@@ -71,6 +74,12 @@ func createHandler(c echo.Context) error {
 	}
 	if domainAliases := c.QueryParam("DomainAliases"); domainAliases != "" {
 		opts.DomainAliases = strings.Split(domainAliases, ",")
+	}
+	if sponsorships := c.QueryParam("sponsorships"); sponsorships != "" {
+		opts.Sponsorships = strings.Split(sponsorships, ",")
+	}
+	if featureSets := c.QueryParam("feature_sets"); featureSets != "" {
+		opts.FeatureSets = strings.Split(featureSets, ",")
 	}
 	if autoUpdate := c.QueryParam("AutoUpdate"); autoUpdate != "" {
 		b, err := strconv.ParseBool(autoUpdate)
@@ -170,6 +179,9 @@ func modifyHandler(c echo.Context) error {
 	if domainAliases := c.QueryParam("DomainAliases"); domainAliases != "" {
 		opts.DomainAliases = strings.Split(domainAliases, ",")
 	}
+	if sponsorships := c.QueryParam("Sponsorships"); sponsorships != "" {
+		opts.Sponsorships = strings.Split(sponsorships, ",")
+	}
 	if quota := c.QueryParam("DiskQuota"); quota != "" {
 		i, err := strconv.ParseInt(quota, 10, 64)
 		if err != nil {
@@ -203,7 +215,7 @@ func modifyHandler(c echo.Context) error {
 	// has its settings database.
 	if deleting, err := strconv.ParseBool(c.QueryParam("Deleting")); err == nil {
 		i.Deleting = deleting
-		if err := i.Update(); err != nil {
+		if err := instance.Update(i); err != nil {
 			return wrapError(err)
 		}
 		return jsonapi.Data(c, http.StatusOK, &apiInstance{i}, nil)
@@ -282,35 +294,6 @@ func deleteHandler(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func updatesHandler(c echo.Context) error {
-	slugs := utils.SplitTrimString(c.QueryParam("Slugs"), ",")
-	domain := c.QueryParam("Domain")
-	domainsWithContext := c.QueryParam("DomainsWithContext")
-	forceRegistry, _ := strconv.ParseBool(c.QueryParam("ForceRegistry"))
-	onlyRegistry, _ := strconv.ParseBool(c.QueryParam("OnlyRegistry"))
-	msg, err := job.NewMessage(&updates.Options{
-		Slugs:              slugs,
-		Force:              true,
-		ForceRegistry:      forceRegistry,
-		OnlyRegistry:       onlyRegistry,
-		Domain:             domain,
-		DomainsWithContext: domainsWithContext,
-		AllDomains:         domain == "",
-	})
-	if err != nil {
-		return err
-	}
-	j, err := job.System().PushJob(prefixer.GlobalPrefixer, &job.JobRequest{
-		WorkerType:  "updates",
-		Message:     msg,
-		ForwardLogs: true,
-	})
-	if err != nil {
-		return wrapError(err)
-	}
-	return c.JSON(http.StatusOK, j)
-}
-
 func setAuthMode(c echo.Context) error {
 	domain := c.Param("domain")
 	inst, err := lifecycle.GetInstance(domain)
@@ -334,7 +317,7 @@ func setAuthMode(c echo.Context) error {
 
 	if !inst.HasAuthMode(authMode) {
 		inst.AuthMode = authMode
-		if err = inst.Update(); err != nil {
+		if err = instance.Update(inst); err != nil {
 			return err
 		}
 	} else {
@@ -410,6 +393,64 @@ func createSessionCode(c echo.Context) error {
 	})
 }
 
+type checkSessionCodeArgs struct {
+	Code string `json:"session_code"`
+}
+
+func checkSessionCode(c echo.Context) error {
+	domain := c.Param("domain")
+	inst, err := lifecycle.GetInstance(domain)
+	if err != nil {
+		return err
+	}
+
+	var args checkSessionCodeArgs
+	if err := c.Bind(&args); err != nil {
+		return err
+	}
+
+	ok := inst.CheckAndClearSessionCode(args.Code)
+	if !ok {
+		return c.JSON(http.StatusForbidden, echo.Map{"valid": false})
+	}
+
+	return c.JSON(http.StatusOK, echo.Map{"valid": true})
+}
+
+func createEmailVerifiedCode(c echo.Context) error {
+	domain := c.Param("domain")
+	inst, err := lifecycle.GetInstance(domain)
+	if err != nil {
+		return err
+	}
+
+	if !inst.HasAuthMode(instance.TwoFactorMail) {
+		return jsonapi.BadRequest(errors.New("2FA by email is not enabled on this instance"))
+	}
+
+	code, err := inst.CreateEmailVerifiedCode()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{
+			"error": err,
+		})
+	}
+
+	req := c.Request()
+	var ip string
+	if forwardedFor := req.Header.Get(echo.HeaderXForwardedFor); forwardedFor != "" {
+		ip = strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
+	}
+	if ip == "" {
+		ip = strings.Split(req.RemoteAddr, ":")[0]
+	}
+	inst.Logger().WithField("nspace", "loginaudit").
+		Infof("New email_verified_code created from %s at %s", ip, time.Now())
+
+	return c.JSON(http.StatusCreated, echo.Map{
+		"email_verified_code": code,
+	})
+}
+
 func cleanSessions(c echo.Context) error {
 	domain := c.Param("domain")
 	inst, err := lifecycle.GetInstance(domain)
@@ -427,11 +468,14 @@ func cleanSessions(c echo.Context) error {
 }
 
 func lastActivity(c echo.Context) error {
-	inst, err := instance.GetFromCouch(c.Param("domain"))
+	inst, err := instance.Get(c.Param("domain"))
 	if err != nil {
 		return jsonapi.NotFound(err)
 	}
 	last := time.Date(2018, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if inst.LastActivityFromDeletedOAuthClients != nil {
+		last = *inst.LastActivityFromDeletedOAuthClients
+	}
 
 	err = couchdb.ForeachDocs(inst, consts.SessionsLogins, func(_ string, data json.RawMessage) error {
 		var entry session.LoginEntry
@@ -457,7 +501,9 @@ func lastActivity(c echo.Context) error {
 		}
 		return nil
 	})
-	if err != nil {
+	// If the instance has not yet been onboarded, the io.cozy.sessions
+	// database will not exist.
+	if err != nil && !couchdb.IsNoDatabaseError(err) {
 		return err
 	}
 
@@ -496,7 +542,7 @@ func lastActivity(c echo.Context) error {
 }
 
 func unxorID(c echo.Context) error {
-	inst, err := instance.GetFromCouch(c.Param("domain"))
+	inst, err := instance.Get(c.Param("domain"))
 	if err != nil {
 		return jsonapi.NotFound(err)
 	}
@@ -508,7 +554,7 @@ func unxorID(c echo.Context) error {
 		err := errors.New("it only works on a recipient's instance")
 		return jsonapi.BadRequest(err)
 	}
-	if len(s.Credentials) != 1 {
+	if len(s.Credentials) != 1 || len(s.Credentials[0].XorKey) == 0 {
 		err := errors.New("unexpected credentials")
 		return jsonapi.BadRequest(err)
 	}
@@ -566,6 +612,34 @@ func diskUsage(c echo.Context) error {
 		result.VersionsCount = stats.DocCount
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func sendNotification(c echo.Context) error {
+	domain := c.Param("domain")
+	instance, err := lifecycle.GetInstance(domain)
+	if err != nil {
+		return err
+	}
+
+	m := map[string]json.RawMessage{}
+	if err := json.NewDecoder(c.Request().Body).Decode(&m); err != nil {
+		return err
+	}
+
+	p := &notification.Properties{}
+	if err := json.Unmarshal(m["properties"], &p); err != nil {
+		return err
+	}
+
+	n := &notification.Notification{}
+	if err := json.Unmarshal(m["notification"], &n); err != nil {
+		return err
+	}
+
+	if err := center.PushCLI(instance.DomainName(), p, n); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, n)
 }
 
 func showPrefix(c echo.Context) error {
@@ -681,10 +755,11 @@ func Routes(router *echo.Group) {
 	router.POST("/:domain/auth-mode", setAuthMode)
 	router.POST("/:domain/magic_link", createMagicLink)
 	router.POST("/:domain/session_code", createSessionCode)
+	router.POST("/:domain/session_code/check", checkSessionCode)
+	router.POST("/:domain/email_verified_code", createEmailVerifiedCode)
 	router.DELETE("/:domain/sessions", cleanSessions)
 
 	// Advanced features for instances
-	router.POST("/updates", updatesHandler)
 	router.GET("/:domain/last-activity", lastActivity)
 	router.POST("/:domain/export", exporter)
 	router.GET("/:domain/exports/:export-id/data", dataExporter)
@@ -693,6 +768,7 @@ func Routes(router *echo.Group) {
 	router.GET("/:domain/prefix", showPrefix)
 	router.GET("/:domain/swift-prefix", getSwiftBucketName)
 	router.GET("/:domain/sharings/:sharing-id/unxor/:doc-id", unxorID)
+	router.POST("/:domain/notifications", sendNotification)
 
 	// Config
 	router.POST("/redis", rebuildRedis)
@@ -710,7 +786,7 @@ func Routes(router *echo.Group) {
 	router.POST("/:domain/checks/sharings", checkSharings)
 
 	// Fixers
-	router.POST("/:domain/fixers/content-mismatch", contentMismatchFixer)
+	router.POST("/:domain/fixers/password-defined", passwordDefinedFixer)
 	router.POST("/:domain/fixers/orphan-account", orphanAccountFixer)
 	router.POST("/:domain/fixers/service-triggers", serviceTriggersFixer)
 	router.POST("/:domain/fixers/indexes", indexesFixer)

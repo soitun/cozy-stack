@@ -34,6 +34,7 @@ func Translator(locale, contextName string) func(key string, vars ...interface{}
 }
 
 var boldRegexp = regexp.MustCompile(`\*\*(.*?)\*\*`)
+var newlineRegexp = regexp.MustCompile(`(\n)`)
 
 // TranslatorHTML returns a translation function of the locale specified, which
 // allow simple markup like **bold**.
@@ -42,6 +43,7 @@ func TranslatorHTML(locale, contextName string) func(key string, vars ...interfa
 		translated := Translate(key, locale, contextName, vars...)
 		escaped := template.HTMLEscapeString(translated)
 		replaced := boldRegexp.ReplaceAllString(escaped, "<strong>$1</strong>")
+		replaced = newlineRegexp.ReplaceAllString(replaced, "<br />")
 		return template.HTML(replaced)
 	}
 }
@@ -49,7 +51,7 @@ func TranslatorHTML(locale, contextName string) func(key string, vars ...interfa
 // Translate translates the given key on the specified locale.
 func Translate(key, locale, contextName string, vars ...interface{}) string {
 	if po, ok := translations[contextName+"/"+locale]; ok {
-		translated := po.Get(key)
+		translated := po.Get(key) //nolint:govet // key is given by the stack and is safe
 		if translated != key && translated != "" {
 			if len(vars) > 0 {
 				return fmt.Sprintf(translated, vars...)
@@ -58,7 +60,7 @@ func Translate(key, locale, contextName string, vars ...interface{}) string {
 		}
 	}
 	if po, ok := translations[locale]; ok {
-		translated := po.Get(key)
+		translated := po.Get(key) //nolint:govet // key is given by the stack and is safe
 		if translated != key && translated != "" {
 			if len(vars) > 0 {
 				return fmt.Sprintf(translated, vars...)

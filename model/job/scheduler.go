@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/cozy/cozy-stack/model/permission"
@@ -48,6 +49,7 @@ type (
 		PollScheduler(now int64) error
 		AddTrigger(trigger Trigger) error
 		GetTrigger(db prefixer.Prefixer, id string) (Trigger, error)
+		UpdateMessage(db prefixer.Prefixer, trigger Trigger, message json.RawMessage) error
 		UpdateCron(db prefixer.Prefixer, trigger Trigger, arguments string) error
 		DeleteTrigger(db prefixer.Prefixer, id string) error
 		GetAllTriggers(db prefixer.Prefixer) ([]Trigger, error)
@@ -105,6 +107,10 @@ func (t *TriggerInfos) DBPrefix() string {
 // DomainName implements the prefixer.Prefixer interface.
 func (t *TriggerInfos) DomainName() string {
 	return t.Domain
+}
+
+func (t *TriggerInfos) IsKonnectorTrigger() bool {
+	return t.WorkerType == "konnector" || t.WorkerType == "client"
 }
 
 // NewTrigger creates the trigger associates with the specified trigger
@@ -180,18 +186,21 @@ func (t *TriggerInfos) Clone() couchdb.Doc {
 		tmp := *t.Options
 		cloned.Options = &tmp
 	}
+
 	if t.Message != nil {
-		tmp := t.Message
-		t.Message = make([]byte, len(tmp))
-		copy(t.Message[:], tmp)
+		cloned.Message = make([]byte, len(t.Message))
+		copy(cloned.Message, t.Message)
 	}
+
 	if t.CurrentState != nil {
 		tmp := *t.CurrentState
 		cloned.CurrentState = &tmp
 	}
+
 	if t.Metadata != nil {
 		cloned.Metadata = t.Metadata.Clone()
 	}
+
 	return &cloned
 }
 

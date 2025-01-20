@@ -49,7 +49,7 @@ __cozy-stack_handle_go_custom_completion()
     local out requestComp lastParam lastChar comp directive args
 
     # Prepare the command to request completions for the program.
-    # Calling ${words[0]} instead of directly cozy-stack allows to handle aliases
+    # Calling ${words[0]} instead of directly cozy-stack allows handling aliases
     args=("${words[@]:1}")
     # Disable ActiveHelp which is not supported for bash completion v1
     requestComp="COZY_STACK_ACTIVE_HELP=0 ${words[0]} __completeNoDesc ${args[*]}"
@@ -1933,40 +1933,6 @@ _cozy-stack_fix_contact-emails()
     noun_aliases=()
 }
 
-_cozy-stack_fix_content-mismatch()
-{
-    last_command="cozy-stack_fix_content-mismatch"
-
-    command_aliases=()
-
-    commands=()
-
-    flags=()
-    two_word_flags=()
-    local_nonpersistent_flags=()
-    flags_with_completion=()
-    flags_completion=()
-
-    flags+=("--no-dry-run")
-    local_nonpersistent_flags+=("--no-dry-run")
-    flags+=("--admin-host=")
-    two_word_flags+=("--admin-host")
-    flags+=("--admin-port=")
-    two_word_flags+=("--admin-port")
-    flags+=("--config=")
-    two_word_flags+=("--config")
-    two_word_flags+=("-c")
-    flags+=("--host=")
-    two_word_flags+=("--host")
-    flags+=("--port=")
-    two_word_flags+=("--port")
-    two_word_flags+=("-p")
-
-    must_have_one_flag=()
-    must_have_one_noun=()
-    noun_aliases=()
-}
-
 _cozy-stack_fix_indexes()
 {
     last_command="cozy-stack_fix_indexes"
@@ -2095,6 +2061,38 @@ _cozy-stack_fix_orphan-account()
     noun_aliases=()
 }
 
+_cozy-stack_fix_password-defined()
+{
+    last_command="cozy-stack_fix_password-defined"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--admin-host=")
+    two_word_flags+=("--admin-host")
+    flags+=("--admin-port=")
+    two_word_flags+=("--admin-port")
+    flags+=("--config=")
+    two_word_flags+=("--config")
+    two_word_flags+=("-c")
+    flags+=("--host=")
+    two_word_flags+=("--host")
+    flags+=("--port=")
+    two_word_flags+=("--port")
+    two_word_flags+=("-p")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _cozy-stack_fix_redis()
 {
     last_command="cozy-stack_fix_redis"
@@ -2109,6 +2107,8 @@ _cozy-stack_fix_redis()
     flags_with_completion=()
     flags_completion=()
 
+    flags+=("--force")
+    local_nonpersistent_flags+=("--force")
     flags+=("--admin-host=")
     two_word_flags+=("--admin-host")
     flags+=("--admin-port=")
@@ -2203,11 +2203,11 @@ _cozy-stack_fix()
 
     commands=()
     commands+=("contact-emails")
-    commands+=("content-mismatch")
     commands+=("indexes")
     commands+=("jobs")
     commands+=("mime")
     commands+=("orphan-account")
+    commands+=("password-defined")
     commands+=("redis")
     commands+=("service-triggers")
     commands+=("thumbnails")
@@ -2335,6 +2335,10 @@ _cozy-stack_instances_add()
     two_word_flags+=("--settings")
     local_nonpersistent_flags+=("--settings")
     local_nonpersistent_flags+=("--settings=")
+    flags+=("--sponsorships=")
+    two_word_flags+=("--sponsorships")
+    local_nonpersistent_flags+=("--sponsorships")
+    local_nonpersistent_flags+=("--sponsorships=")
     flags+=("--swift-layout=")
     two_word_flags+=("--swift-layout")
     local_nonpersistent_flags+=("--swift-layout")
@@ -2847,6 +2851,10 @@ _cozy-stack_instances_modify()
     two_word_flags+=("--settings")
     local_nonpersistent_flags+=("--settings")
     local_nonpersistent_flags+=("--settings=")
+    flags+=("--sponsorships=")
+    two_word_flags+=("--sponsorships")
+    local_nonpersistent_flags+=("--sponsorships")
+    local_nonpersistent_flags+=("--sponsorships=")
     flags+=("--tos=")
     two_word_flags+=("--tos")
     local_nonpersistent_flags+=("--tos")
@@ -3241,52 +3249,6 @@ _cozy-stack_instances_token-oauth()
     noun_aliases=()
 }
 
-_cozy-stack_instances_update()
-{
-    last_command="cozy-stack_instances_update"
-
-    command_aliases=()
-
-    commands=()
-
-    flags=()
-    two_word_flags=()
-    local_nonpersistent_flags=()
-    flags_with_completion=()
-    flags_completion=()
-
-    flags+=("--all-domains")
-    local_nonpersistent_flags+=("--all-domains")
-    flags+=("--context-name=")
-    two_word_flags+=("--context-name")
-    local_nonpersistent_flags+=("--context-name")
-    local_nonpersistent_flags+=("--context-name=")
-    flags+=("--domain=")
-    two_word_flags+=("--domain")
-    local_nonpersistent_flags+=("--domain")
-    local_nonpersistent_flags+=("--domain=")
-    flags+=("--force-registry")
-    local_nonpersistent_flags+=("--force-registry")
-    flags+=("--only-registry")
-    local_nonpersistent_flags+=("--only-registry")
-    flags+=("--admin-host=")
-    two_word_flags+=("--admin-host")
-    flags+=("--admin-port=")
-    two_word_flags+=("--admin-port")
-    flags+=("--config=")
-    two_word_flags+=("--config")
-    two_word_flags+=("-c")
-    flags+=("--host=")
-    two_word_flags+=("--host")
-    flags+=("--port=")
-    two_word_flags+=("--port")
-    two_word_flags+=("-p")
-
-    must_have_one_flag=()
-    must_have_one_noun=()
-    noun_aliases=()
-}
-
 _cozy-stack_instances()
 {
     last_command="cozy-stack_instances"
@@ -3334,11 +3296,6 @@ _cozy-stack_instances()
     commands+=("token-cli")
     commands+=("token-konnector")
     commands+=("token-oauth")
-    commands+=("update")
-    if [[ -z "${BASH_VERSION:-}" || "${BASH_VERSINFO[0]:-}" -gt 3 ]]; then
-        command_aliases+=("updates")
-        aliashash["updates"]="update"
-    fi
 
     flags=()
     two_word_flags=()
@@ -3919,14 +3876,16 @@ _cozy-stack_serve()
     two_word_flags+=("--flagship-apk-package-names")
     flags+=("--flagship-apple-app-ids=")
     two_word_flags+=("--flagship-apple-app-ids")
+    flags+=("--flagship-play-integrity-decryption-keys=")
+    two_word_flags+=("--flagship-play-integrity-decryption-keys")
+    flags+=("--flagship-play-integrity-verification-keys=")
+    two_word_flags+=("--flagship-play-integrity-verification-keys")
     flags+=("--fs-default-layout=")
     two_word_flags+=("--fs-default-layout")
     flags+=("--fs-url=")
     two_word_flags+=("--fs-url")
     flags+=("--geodb=")
     two_word_flags+=("--geodb")
-    flags+=("--hooks=")
-    two_word_flags+=("--hooks")
     flags+=("--jobs-url=")
     two_word_flags+=("--jobs-url")
     flags+=("--konnectors-cmd=")
@@ -3943,6 +3902,8 @@ _cozy-stack_serve()
     flags+=("--mail-disable-tls")
     flags+=("--mail-host=")
     two_word_flags+=("--mail-host")
+    flags+=("--mail-local-name=")
+    two_word_flags+=("--mail-local-name")
     flags+=("--mail-noreply-address=")
     two_word_flags+=("--mail-noreply-address")
     flags+=("--mail-noreply-name=")
@@ -3953,6 +3914,7 @@ _cozy-stack_serve()
     two_word_flags+=("--mail-port")
     flags+=("--mail-reply-to=")
     two_word_flags+=("--mail-reply-to")
+    flags+=("--mail-use-ssl")
     flags+=("--mail-username=")
     two_word_flags+=("--mail-username")
     flags+=("--mailhog")

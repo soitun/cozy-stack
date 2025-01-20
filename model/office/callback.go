@@ -1,3 +1,5 @@
+// Package office is for interactions with an OnlyOffice server to allow users
+// to view/edit their office documents online.
 package office
 
 import (
@@ -6,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/cozy/cozy-stack/model/instance"
@@ -13,8 +18,9 @@ import (
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/crypto"
+	"github.com/cozy/cozy-stack/pkg/metadata"
 
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 // Status list is described on https://api.onlyoffice.com/editors/callback#status
@@ -27,6 +33,10 @@ const (
 	// by users.
 	StatusForceSaveRequested = 6
 )
+
+// OOSlug is the slug for uploadedBy field of the CozyMetadata when a file has
+// been modified in the online OnlyOffice.
+const OOSlug = "onlyoffice-server"
 
 // CallbackParameters is a struct for the parameters sent by the document
 // server to the stack.
@@ -50,12 +60,16 @@ type callbackClaims struct {
 	} `json:"payload"`
 }
 
-// Valid is part of the jwt.Claims interface
-func (c *callbackClaims) Valid() error { return nil }
+func (c *callbackClaims) GetExpirationTime() (*jwt.NumericDate, error) { return nil, nil }
+func (c *callbackClaims) GetIssuedAt() (*jwt.NumericDate, error)       { return nil, nil }
+func (c *callbackClaims) GetNotBefore() (*jwt.NumericDate, error)      { return nil, nil }
+func (c *callbackClaims) GetIssuer() (string, error)                   { return "", nil }
+func (c *callbackClaims) GetSubject() (string, error)                  { return "", nil }
+func (c *callbackClaims) GetAudience() (jwt.ClaimStrings, error)       { return nil, nil }
 
 // Callback will manage the callback from the document server.
 func Callback(inst *instance.Instance, params CallbackParameters) error {
-	cfg := getConfig(inst.ContextName)
+	cfg := GetConfig(inst.ContextName)
 	if err := checkToken(cfg, params); err != nil {
 		return err
 	}
@@ -94,7 +108,7 @@ func checkToken(cfg *config.Office, params CallbackParameters) error {
 func finalSaveFile(inst *instance.Instance, key, downloadURL string) error {
 	detector, err := GetStore().GetDoc(inst, key)
 	if err != nil || detector == nil || detector.ID == "" || detector.Rev == "" {
-		return errors.New("invalid key")
+		return ErrInvalidKey
 	}
 
 	_, err = saveFile(inst, *detector, downloadURL)
@@ -107,7 +121,7 @@ func finalSaveFile(inst *instance.Instance, key, downloadURL string) error {
 func forceSaveFile(inst *instance.Instance, key, downloadURL string) error {
 	detector, err := GetStore().GetDoc(inst, key)
 	if err != nil || detector == nil || detector.ID == "" || detector.Rev == "" {
-		return errors.New("invalid key")
+		return ErrInvalidKey
 	}
 
 	updated, err := saveFile(inst, *detector, downloadURL)
@@ -118,14 +132,11 @@ func forceSaveFile(inst *instance.Instance, key, downloadURL string) error {
 }
 
 // saveFile saves the file with content from the given URL and returns the new revision.
-func saveFile(inst *instance.Instance, detector conflictDetector, downloadURL string) (*conflictDetector, error) {
+func saveFile(inst *instance.Instance, detector ConflictDetector, downloadURL string) (*ConflictDetector, error) {
 	fs := inst.VFS()
 	file, err := fs.FileByID(detector.ID)
 	if err != nil {
 		return nil, err
-	}
-	if !isOfficeDocument(file) {
-		return nil, ErrInvalidFile
 	}
 
 	res, err := docserverClient.Get(downloadURL)
@@ -139,15 +150,22 @@ func saveFile(inst *instance.Instance, detector conflictDetector, downloadURL st
 		_ = res.Body.Close()
 	}()
 
+	instanceURL := inst.PageURL("/", nil)
 	newfile := file.Clone().(*vfs.FileDoc)
 	newfile.MD5Sum = nil // Let the VFS compute the new md5sum
 	newfile.ByteSize = res.ContentLength
 	if newfile.CozyMetadata == nil {
-		newfile.CozyMetadata = vfs.NewCozyMetadata(inst.PageURL("/", nil))
+		newfile.CozyMetadata = vfs.NewCozyMetadata(instanceURL)
 	}
 	newfile.UpdatedAt = time.Now()
+	newfile.CozyMetadata.UpdatedByApp(&metadata.UpdatedByAppEntry{
+		Slug:     OOSlug,
+		Date:     newfile.UpdatedAt,
+		Instance: instanceURL,
+	})
 	newfile.CozyMetadata.UpdatedAt = newfile.UpdatedAt
 	newfile.CozyMetadata.UploadedAt = &newfile.UpdatedAt
+	newfile.CozyMetadata.UploadedBy = &vfs.UploadedByEntry{Slug: OOSlug}
 
 	// If the file was renamed while OO editor was opened, the revision has
 	// been changed, but we still should avoid creating a conflict if the
@@ -157,19 +175,28 @@ func saveFile(inst *instance.Instance, detector conflictDetector, downloadURL st
 		file = nil
 		newfile.SetID("")
 		newfile.SetRev("")
-		newfile.DocName = fmt.Sprintf("%s - conflict - %d", newfile.DocName, time.Now().Unix())
+	}
+
+	basename := newfile.DocName
+	var f vfs.File
+	for i := 2; i < 100; i++ {
+		f, err = fs.CreateFile(newfile, file)
+		if err == nil {
+			break
+		} else if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		ext := path.Ext(basename)
+		filename := strings.TrimSuffix(path.Base(basename), ext)
+		newfile.DocName = fmt.Sprintf("%s (%d)%s", filename, i, ext)
 		newfile.ResetFullpath()
 		_, _ = newfile.Path(inst.VFS()) // Prefill the fullpath
 	}
 
-	f, err := fs.CreateFile(newfile, file)
-	if err != nil {
-		return nil, err
-	}
 	_, err = io.Copy(f, res.Body)
 	if cerr := f.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
-	updated := conflictDetector{ID: newfile.ID(), Rev: newfile.Rev(), MD5Sum: newfile.MD5Sum}
+	updated := ConflictDetector{ID: newfile.ID(), Rev: newfile.Rev(), MD5Sum: newfile.MD5Sum}
 	return &updated, err
 }

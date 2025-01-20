@@ -12,11 +12,11 @@ import (
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/tests/testutils"
 	"github.com/cozy/cozy-stack/web/errors"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/gavv/httpexpect/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +27,7 @@ func TestPermissions(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	testutils.NeedCouchdb(t)
 	setup := testutils.NewSetup(t, t.Name())
 
@@ -677,10 +677,10 @@ func TestPermissions(t *testing.T) {
 		oauthClient.Create(testInstance)
 
 		parent, err := middlewares.GetForOauth(testInstance, &permission.Claims{
-			StandardClaims: crypto.StandardClaims{
-				Audience: consts.AccessTokenAudience,
+			RegisteredClaims: jwt.RegisteredClaims{
+				Audience: jwt.ClaimStrings{consts.AccessTokenAudience},
 				Issuer:   testInstance.Domain,
-				IssuedAt: crypto.Timestamp(),
+				IssuedAt: jwt.NewNumericDate(time.Now()),
 				Subject:  clientID,
 			},
 			Scope: "@io.cozy.apps/settings",
@@ -697,10 +697,10 @@ func TestPermissions(t *testing.T) {
 		ev3, _ := createTestEvent(testInstance)
 
 		parent, _ := middlewares.GetForOauth(testInstance, &permission.Claims{
-			StandardClaims: crypto.StandardClaims{
-				Audience: consts.AccessTokenAudience,
+			RegisteredClaims: jwt.RegisteredClaims{
+				Audience: jwt.ClaimStrings{consts.AccessTokenAudience},
 				Issuer:   testInstance.Domain,
-				IssuedAt: crypto.Timestamp(),
+				IssuedAt: jwt.NewNumericDate(time.Now()),
 				Subject:  clientID,
 			},
 			Scope: "io.cozy.events",
@@ -785,6 +785,34 @@ func TestPermissions(t *testing.T) {
 		data = obj.Value("data").Array()
 		data.Length().Equal(1)
 		obj.Path("$.links.next").String().NotEmpty()
+	})
+
+	t.Run("ShowPermissions", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+		id, _, _ := createTestSubPermissions(e, token, "alice")
+
+		obj := e.GET("/permissions/"+id).
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		perms := obj.Path("$.data.attributes.permissions").Object()
+
+		for _, r := range perms.Iter() {
+			r.Object().ValueEqual("type", "io.cozy.files")
+			r.Object().ValueEqual("verbs", []interface{}{"GET"})
+		}
+	})
+
+	t.Run("ShowPermissionsFail", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+		id, _, _ := createTestSubPermissions(e, token, "alice")
+		_, otherToken := setup.GetTestClient("io.cozy.tags")
+
+		e.GET("/permissions/"+id).
+			WithHeader("Authorization", "Bearer "+otherToken).
+			Expect().Status(403)
 	})
 
 	t.Run("CreatePermissionWithoutMetadata", func(t *testing.T) {

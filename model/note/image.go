@@ -15,7 +15,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/metadata"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/realtime"
-	"github.com/gofrs/uuid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // MaxWidth is the maximal width of an image for a note. If larger, the image
@@ -73,8 +73,8 @@ type ImageUpload struct {
 
 // NewImageUpload can be used to manage uploading a new image for a note.
 func NewImageUpload(inst *instance.Instance, note *vfs.FileDoc, name, mime string) (*ImageUpload, error) {
-	uuidv4, _ := uuid.NewV4()
-	id := note.ID() + "/" + uuidv4.String()
+	uuidv7, _ := uuid.NewV7()
+	id := note.ID() + "/" + uuidv7.String()
 	md := metadata.New()
 	md.CreatedByApp = consts.NotesSlug
 	img := &Image{DocID: id, Name: name, Mime: mime, Metadata: *md, originalName: name}
@@ -176,6 +176,37 @@ func (u *ImageUpload) Close() error {
 	}
 
 	return nil
+}
+
+// CopyImageToAnotherNote makes a copy of an image from one note to be used in
+// another note.
+func CopyImageToAnotherNote(inst *instance.Instance, imageID string, dstDoc *vfs.FileDoc) (*Image, error) {
+	// Open the existing image
+	var image Image
+	if err := couchdb.GetDoc(inst, consts.NotesImages, imageID, &image); err != nil {
+		return nil, err
+	}
+	thumb, err := inst.ThumbsFS().OpenNoteThumb(imageID, consts.NoteImageOriginalFormat)
+	if err != nil {
+		return nil, err
+	}
+	defer thumb.Close()
+
+	// Prepare the new image document
+	upload, err := NewImageUpload(inst, dstDoc, image.Name, image.Mime)
+	if err != nil {
+		return nil, err
+	}
+
+	// Copy the content
+	_, err = io.Copy(upload, thumb)
+	if cerr := upload.Close(); cerr != nil && (err == nil || errors.Is(err, io.ErrUnexpectedEOF)) {
+		err = cerr
+	}
+	if err != nil {
+		return nil, err
+	}
+	return upload.Image, nil
 }
 
 func contains(haystack []string, needle string) bool {

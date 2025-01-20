@@ -1,3 +1,5 @@
+// Package permissions is the HTTP handlers for managing the permissions on a
+// Cozy (creating a share by link for example).
 package permissions
 
 import (
@@ -96,9 +98,12 @@ func displayPermissions(c echo.Context) error {
 		}
 	}
 
-	// XXX hides the codes in the response
+	// XXX hides the codes and password hash in the response
 	doc.Codes = nil
 	doc.ShortCodes = nil
+	if doc.Password != nil {
+		doc.Password = true
+	}
 	return jsonapi.Data(c, http.StatusOK, &APIPermission{doc, included}, nil)
 }
 
@@ -189,6 +194,11 @@ func createPermission(c echo.Context) error {
 		return err
 	}
 
+	// Don't send the password hash to the client
+	if pdoc.Password != nil {
+		pdoc.Password = true
+	}
+
 	return jsonapi.Data(c, http.StatusOK, &APIPermission{pdoc, nil}, nil)
 }
 
@@ -243,7 +253,11 @@ func listPermissionsByDoctype(c echo.Context, route, permType string) error {
 
 	out := make([]jsonapi.Object, len(perms))
 	for i := range perms {
-		out[i] = &APIPermission{&perms[i], nil}
+		perm := &perms[i]
+		if perm.Password != nil {
+			perm.Password = true
+		}
+		out[i] = &APIPermission{perm, nil}
 	}
 
 	return jsonapi.DataList(c, http.StatusOK, out, links)
@@ -297,6 +311,34 @@ func listPermissions(c echo.Context) error {
 	resp.Header().Set(echo.HeaderContentType, jsonapi.ContentType)
 	resp.WriteHeader(http.StatusOK)
 	return json.NewEncoder(resp).Encode(doc)
+}
+
+func showPermissions(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+
+	current, err := middlewares.GetPermission(c)
+	if err != nil {
+		return err
+	}
+
+	doc, err := permission.GetByID(inst, c.Param("permdocid"))
+	if err != nil {
+		return err
+	}
+
+	if doc.ID() != current.ID() && doc.SourceID != current.SourceID {
+		if err := middlewares.AllowMaximal(c); err != nil {
+			return middlewares.ErrForbidden
+		}
+	}
+
+	// XXX hides the codes and password hash in the response
+	doc.Codes = nil
+	doc.ShortCodes = nil
+	if doc.Password != nil {
+		doc.Password = true
+	}
+	return jsonapi.Data(c, http.StatusOK, &APIPermission{Permission: doc}, nil)
 }
 
 func patchPermission(getPerms getPermsFunc, paramName string) echo.HandlerFunc {
@@ -399,6 +441,7 @@ func Routes(router *echo.Group) {
 	router.POST("", createPermission)
 	router.GET("/self", displayPermissions)
 	router.POST("/exists", listPermissions)
+	router.GET("/:permdocid", showPermissions)
 	router.PATCH("/:permdocid", patchPermission(permission.GetByID, "permdocid"))
 	router.DELETE("/:permdocid", revokePermission)
 

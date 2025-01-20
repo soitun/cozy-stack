@@ -28,7 +28,7 @@ func TestOidc(t *testing.T) {
 
 	var redirectURL *url.URL
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	config.GetConfig().Assets = "../../assets"
 	testutils.NeedCouchdb(t)
 	setup := testutils.NewSetup(t, t.Name())
@@ -39,7 +39,7 @@ func TestOidc(t *testing.T) {
 	wl := &job.WorkerConfig{
 		WorkerType:  "sendmail",
 		Concurrency: 4,
-		WorkerFunc: func(ctx *job.WorkerContext) error {
+		WorkerFunc: func(ctx *job.TaskContext) error {
 			return nil
 		},
 	}

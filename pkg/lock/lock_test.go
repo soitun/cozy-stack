@@ -49,6 +49,16 @@ func TestLock(t *testing.T) {
 
 		db := prefixer.NewPrefixer(0, "cozy.local", "cozy.local")
 		l := client.ReadWrite(db, "test-redis")
+		l.(*redisLock).timeout = time.Second
+		l.(*redisLock).waitRetry = 100 * time.Millisecond
+
+		require.NoError(t, l.RLock())
+		require.NoError(t, l.RLock())
+		l.RUnlock()
+		require.Error(t, l.Lock())
+		l.RUnlock()
+		require.NoError(t, l.Lock())
+		l.Unlock()
 
 		hammerRW(t, l)
 
@@ -60,9 +70,9 @@ func TestLock(t *testing.T) {
 			<-done
 		}
 
-		other := client.ReadWrite(db, "test-redis").(*redisLock)
+		other := client.ReadWrite(db, "test-redis")
 		assert.NoError(t, l.Lock())
-		assert.Error(t, other.LockWithTimeout(1*time.Second))
+		assert.Error(t, other.Lock())
 
 		l.Unlock()
 	})
@@ -79,13 +89,27 @@ func TestLock(t *testing.T) {
 		db := prefixer.NewPrefixer(0, "cozy.local", "cozy.local")
 		long := client.LongOperation(db, "test-long")
 
-		l := client.ReadWrite(db, "test-long").(*redisLock)
+		// Reduce the default timeout duration.
+		long.(*longOperation).timeout = 50 * time.Millisecond
+
+		l := client.ReadWrite(db, "test-long")
+		l.(*redisLock).timeout = 200 * time.Millisecond
+		l.(*redisLock).waitRetry = 10 * time.Millisecond
+
+		// Take the lock and refresh it every 20ms without
+		// losing the lock
 		assert.NoError(t, long.Lock())
 
+		// Try a second lock. It should fail after 200ms, and the long lock
+		// will have been extended a few times in this span of time.
 		err = l.Lock()
 		assert.Error(t, err)
 		assert.Equal(t, ErrTooManyRetries, err)
-		l.Unlock()
+		long.Unlock()
+
+		// Check that a long lock can be reused
+		assert.NoError(t, long.Lock())
+		long.Unlock()
 	})
 }
 

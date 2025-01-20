@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"testing"
@@ -18,19 +17,20 @@ import (
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/permission"
 	"github.com/cozy/cozy-stack/model/session"
+	"github.com/cozy/cozy-stack/model/stack"
 	"github.com/cozy/cozy-stack/pkg/assets/dynamic"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/crypto"
+	"github.com/cozy/cozy-stack/pkg/metadata"
 	"github.com/cozy/cozy-stack/tests/testutils"
 	"github.com/cozy/cozy-stack/web"
 	"github.com/cozy/cozy-stack/web/apps"
-	"github.com/cozy/cozy-stack/web/auth"
 	"github.com/cozy/cozy-stack/web/errors"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/gavv/httpexpect/v2"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,9 +56,22 @@ func TestAuth(t *testing.T) {
 	var code string
 	var refreshToken string
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 	conf := config.GetConfig()
 	conf.Assets = "../../assets"
+	conf.DeprecatedApps = config.DeprecatedAppsCfg{
+		Apps: []config.DeprecatedApp{
+			{
+				SoftwareID: "github.com/some-deprecated-app",
+				Name:       "some-deprecated-app",
+				StoreURLs: map[string]string{
+					// Must test "market://" url
+					"android": "market://some-market-url",
+					"iphone":  "https://some-basic-url",
+				},
+			},
+		},
+	}
 
 	conf.Authentication = make(map[string]interface{})
 	confAuth := make(map[string]interface{})
@@ -78,7 +91,7 @@ func TestAuth(t *testing.T) {
 	})
 
 	ts := setup.GetTestServer("/test", fakeAPI, func(r *echo.Echo) *echo.Echo {
-		handler, err := web.CreateSubdomainProxy(r, apps.Serve)
+		handler, err := web.CreateSubdomainProxy(r, &stack.Services{}, apps.Serve)
 		require.NoError(t, err, "Cant start subdomain proxy")
 		return handler
 	})
@@ -91,7 +104,7 @@ func TestAuth(t *testing.T) {
 
 		// Block the instance
 		testInstance.Blocked = true
-		require.NoError(t, testInstance.Update())
+		require.NoError(t, instance.Update(testInstance))
 
 		e.GET("/auth/login").
 			WithHost(testInstance.Domain).
@@ -109,7 +122,7 @@ func TestAuth(t *testing.T) {
 
 		// Unblock the instance
 		testInstance.Blocked = false
-		_ = testInstance.Update()
+		_ = instance.Update(testInstance)
 	})
 
 	t.Run("IsLoggedInWhenNotLoggedIn", func(t *testing.T) {
@@ -551,6 +564,36 @@ func TestAuth(t *testing.T) {
 			Body().NotContains(clientSecret)
 	})
 
+	t.Run("DeprecatedApp", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		deprecatedClientID := e.POST("/auth/register").
+			WithHost(domain).
+			WithHeader("Accept", "application/json").
+			WithJSON(map[string]interface{}{
+				"redirect_uris": []string{"https://example.org/oauth/callback"},
+				"client_name":   "cozy-test",
+				"software_id":   "github.com/some-deprecated-app",
+			}).
+			Expect().Status(201).
+			JSON().Object().
+			Value("client_id").String().NotEmpty().NotEqual("ignored").Raw()
+
+		body := e.GET("/auth/authorize").
+			WithHeader("User-Agent", "Mozilla/5.0 (Linux; U; Android 1.5; de-; HTC Magic Build/PLAT-RC33) AppleWebKit/528.5+ (KHTML, like Gecko) Version/3.1.2 Mobile Safari/525.20.1").
+			WithQuery("response_type", "code").
+			WithQuery("state", "123456").
+			WithQuery("scope", "files:read").
+			WithQuery("redirect_uri", "https://example.org/oauth/callback").
+			WithQuery("client_id", deprecatedClientID).
+			WithHost(domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			Body()
+
+		body.Contains(`href="market://some-market-url"`)
+	})
+
 	t.Run("ReadClientInvalidClientID", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
@@ -640,8 +683,8 @@ func TestAuth(t *testing.T) {
 			WithHeader("Authorization", "Bearer "+registrationToken).
 			WithJSON(map[string]interface{}{
 				"client_id":        clientID,
+				"client_name":      "cozy-test-new-name",
 				"redirect_uris":    []string{"https://example.org/oauth/callback"},
-				"client_name":      "cozy-test",
 				"software_id":      "github.com/cozy/cozy-test",
 				"software_version": "v0.1.3",
 			}).
@@ -655,7 +698,7 @@ func TestAuth(t *testing.T) {
 		obj.ValueEqual("redirect_uris", []string{"https://example.org/oauth/callback"})
 		obj.ValueEqual("grant_types", []string{"authorization_code", "refresh_token"})
 		obj.ValueEqual("response_types", []string{"code"})
-		obj.ValueEqual("client_name", "cozy-test")
+		obj.ValueEqual("client_name", "cozy-test-new-name")
 		obj.ValueEqual("software_id", "github.com/cozy/cozy-test")
 		obj.ValueEqual("software_version", "v0.1.3")
 	})
@@ -1038,162 +1081,6 @@ func TestAuth(t *testing.T) {
 		assert.Equal(t, results[0].Scope, "files:read")
 	})
 
-	t.Run("AuthorizeSuccessOnboardingDeeplink", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-		oauthClient.RedirectURIs = []string{"cozydrive://"}
-		oauthClient.ClientName = "cozy-test-install-app"
-		oauthClient.SoftwareID = "io.cozy.mobile.drive"
-		oauthClient.OnboardingSecret = "toto"
-		oauthClient.Create(testInstance)
-
-		body := e.GET("/auth/authorize").
-			WithQuery("response_type", "code").
-			WithQuery("state", "123456").
-			WithQuery("scope", "files:read").
-			WithQuery("redirect_uri", "https://example.org/oauth/callback").
-			WithQuery("client_id", clientID).
-			WithHost(domain).
-			WithCookie(session.CookieName(testInstance), sessionID).
-			Expect().Status(200).
-			ContentType("text/html", "utf-8").
-			Body()
-
-		body.Contains("would like permission to access your Cozy")
-		matches := body.Match(`<input type="hidden" name="csrf_token" value="(\w+)"`)
-		matches.Length().Equal(2)
-		csrfToken = matches.Index(1).Raw()
-
-		e.POST("/auth/authorize").
-			WithHeader("Accept", "application/json").
-			WithFormField("state", "123456").
-			WithFormField("client_id", oauthClient.ClientID).
-			WithFormField("redirect_uri", "cozydrive://").
-			WithFormField("scope", "files:read").
-			WithFormField("csrf_token", csrfToken).
-			WithFormField("response_type", "code").
-			WithHost(domain).
-			WithCookie("_csrf", csrfToken).
-			WithCookie(session.CookieName(testInstance), sessionID).
-			Expect().Status(200).
-			JSON().Object().
-			Value("deeplink").
-			String().HasPrefix("cozydrive:?")
-	})
-
-	t.Run("AuthorizeSuccessOnboarding", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-		u := "https://example.org/oauth/callback"
-		oauthClient.RedirectURIs = []string{u}
-		oauthClient.ClientName = "cozy-test-install-app"
-		oauthClient.SoftwareID = "io.cozy.mobile.drive"
-		oauthClient.OnboardingSecret = "toto"
-		oauthClient.Create(testInstance)
-
-		e.POST("/auth/authorize").
-			WithFormField("state", "123456").
-			WithFormField("client_id", oauthClient.ClientID).
-			WithFormField("redirect_uri", "https://example.org/oauth/callback").
-			WithFormField("scope", "files:read").
-			WithFormField("csrf_token", csrfToken).
-			WithFormField("response_type", "code").
-			WithHost(domain).
-			WithCookie("_csrf", csrfToken).
-			WithCookie(session.CookieName(testInstance), sessionID).
-			WithRedirectPolicy(httpexpect.DontFollowRedirects).
-			Expect().Status(302)
-	})
-
-	t.Run("InstallAppWithLinkedApp", func(t *testing.T) {
-		var linkedClientID string
-		var linkedClientSecret string
-		var linkedCode string
-
-		t.Run("Success", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
-
-			var oauthClient oauth.Client
-			oauthClient.RedirectURIs = []string{"https://example.org/oauth/callback"}
-			oauthClient.ClientName = "cozy-test-install-app"
-			oauthClient.SoftwareID = "registry://drive"
-			oauthClient.Create(testInstance)
-
-			linkedClientID = oauthClient.ClientID         // Used for following tests
-			linkedClientSecret = oauthClient.ClientSecret // Used for following tests
-
-			e.POST("/auth/authorize").
-				WithFormField("state", "123456").
-				WithFormField("client_id", oauthClient.ClientID).
-				WithFormField("redirect_uri", "https://example.org/oauth/callback").
-				WithFormField("scope", "files:read").
-				WithFormField("csrf_token", csrfToken).
-				WithFormField("response_type", "code").
-				WithHost(domain).
-				WithCookie("_csrf", csrfToken).
-				WithCookie(session.CookieName(testInstance), sessionID).
-				WithRedirectPolicy(httpexpect.DontFollowRedirects).
-				Expect().Status(302)
-
-			couch := config.CouchCluster(testInstance.DBCluster())
-			db := testInstance.DBPrefix() + "%2F" + consts.Apps
-			err := couchdb.EnsureDBExist(testInstance, consts.Apps)
-			assert.NoError(t, err)
-			reqGetChanges, err := http.NewRequest("GET", couch.URL.String()+couchdb.EscapeCouchdbName(db)+"/_changes?feed=longpoll", nil)
-			assert.NoError(t, err)
-			if auth := couch.Auth; auth != nil {
-				if p, ok := auth.Password(); ok {
-					reqGetChanges.SetBasicAuth(auth.Username(), p)
-				}
-			}
-			resGetChanges, err := config.CouchClient().Do(reqGetChanges)
-			assert.NoError(t, err)
-			defer resGetChanges.Body.Close()
-			assert.Equal(t, resGetChanges.StatusCode, 200)
-			body, err := io.ReadAll(resGetChanges.Body)
-			assert.NoError(t, err)
-			assert.Contains(t, string(body), "io.cozy.apps/drive")
-
-			var results []oauth.AccessCode
-			reqDocs := &couchdb.AllDocsRequest{}
-			err = couchdb.GetAllDocs(testInstance, consts.OAuthAccessCodes, reqDocs, &results)
-			assert.NoError(t, err)
-			for _, result := range results {
-				if result.ClientID == linkedClientID {
-					linkedCode = result.Code
-					break
-				}
-			}
-		})
-
-		t.Run("CheckLinkedAppInstalled", func(t *testing.T) {
-			// We use the webapp drive installed from the previous test
-			err := auth.CheckLinkedAppInstalled(testInstance, "drive")
-			assert.NoError(t, err)
-		})
-
-		t.Run("AccessTokenLinkedAppInstalled", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
-
-			obj := e.POST("/auth/access_token").
-				WithFormField("grant_type", "authorization_code").
-				WithFormField("client_id", linkedClientID).
-				WithFormField("client_secret", linkedClientSecret).
-				WithFormField("code", linkedCode).
-				WithHost(domain).
-				Expect().Status(200).
-				JSON().Object()
-
-			obj.ValueEqual("token_type", "bearer")
-			obj.ValueEqual("scope", "@io.cozy.apps/drive")
-
-			assertValidToken(t, testInstance, obj.Value("access_token").String().Raw(), "access", linkedClientID, "@io.cozy.apps/drive")
-			assertValidToken(t, testInstance, obj.Value("refresh_token").String().Raw(), "refresh", linkedClientID, "@io.cozy.apps/drive")
-		})
-	})
-
 	t.Run("AccessTokenNoGrantType", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
@@ -1354,10 +1241,10 @@ func TestAuth(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
 		claims := permission.Claims{
-			StandardClaims: crypto.StandardClaims{
-				Audience: consts.RefreshTokenAudience,
+			RegisteredClaims: jwt.RegisteredClaims{
+				Audience: jwt.ClaimStrings{consts.RefreshTokenAudience},
 				Issuer:   domain,
-				IssuedAt: crypto.Timestamp(),
+				IssuedAt: jwt.NewNumericDate(time.Now()),
 				Subject:  clientID,
 			},
 			Scope: "files:write",
@@ -1561,18 +1448,6 @@ func TestAuth(t *testing.T) {
 		})
 	})
 
-	t.Run("AppRedirectionOnLogin", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		e.GET("/auth/login").
-			WithQuery("redirect", "drive/#/foobar").
-			WithHost(domain).
-			WithCookie(session.CookieName(testInstance), sessionID).
-			WithRedirectPolicy(httpexpect.DontFollowRedirects).
-			Expect().Status(303).
-			Header("Location").Equal("https://drive.cozy.example.net#/foobar")
-	})
-
 	t.Run("LogoutNoToken", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
@@ -1751,7 +1626,7 @@ func TestAuth(t *testing.T) {
 			WithHost(d).
 			Expect().Status(200)
 
-		in2, err := instance.GetFromCouch(d)
+		in2, err := instance.Get(d)
 		require.NoError(t, err)
 
 		e.POST("/auth/passphrase_renew").
@@ -1774,103 +1649,6 @@ func TestAuth(t *testing.T) {
 			Expect().Status(200).
 			Text(httpexpect.ContentOpts{MediaType: "text/plain"}).
 			Equal("who_are_you")
-	})
-
-	t.Run("SecretExchangeGoodSecret", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-
-		oauthClient.RedirectURIs = []string{"abc"}
-		oauthClient.ClientName = "cozy-test"
-		oauthClient.SoftwareID = "github.com/cozy/cozy-test"
-		oauthClient.OnboardingSecret = "foobarsecret"
-		oauthClient.Create(testInstance)
-
-		e.POST("/auth/secret_exchange").
-			WithHeader("Content-Type", "application/json; charset=utf-8").
-			WithHeader("Accept", "application/json").
-			WithHost(domain).
-			WithBytes([]byte(`{ "secret": "foobarsecret" }`)).
-			Expect().Status(200).
-			JSON().Object().
-			Value("client_secret").String().NotEmpty()
-	})
-
-	t.Run("SecretExchangeBadSecret", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-
-		oauthClient.RedirectURIs = []string{"abc"}
-		oauthClient.ClientName = "cozy-test"
-		oauthClient.SoftwareID = "github.com/cozy/cozy-test"
-		oauthClient.OnboardingSecret = "foobarsecret"
-		oauthClient.Create(testInstance)
-
-		e.POST("/auth/secret_exchange").
-			WithHeader("Content-Type", "application/json; charset=utf-8").
-			WithHeader("Accept", "application/json").
-			WithHost(domain).
-			WithBytes([]byte(`{ "secret": "bad secret" }`)). // invalid
-			Expect().Status(404).
-			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
-			Object().
-			Value("errors").Array().NotEmpty()
-	})
-
-	t.Run("SecretExchangeBadPayload", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-
-		oauthClient.RedirectURIs = []string{"abc"}
-		oauthClient.ClientName = "cozy-test"
-		oauthClient.SoftwareID = "github.com/cozy/cozy-test"
-		oauthClient.OnboardingSecret = "foobarsecret"
-		oauthClient.Create(testInstance)
-
-		e.POST("/auth/secret_exchange").
-			WithHeader("Content-Type", "application/json; charset=utf-8").
-			WithHeader("Accept", "application/json").
-			WithHost(domain).
-			WithBytes([]byte(`{ "foo": "bar" }`)). // invalid
-			Expect().Status(400).
-			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
-			Object().
-			Value("errors").Array().ContainsOnly(map[string]interface{}{
-			"detail": "Missing secret",
-			"source": map[string]interface{}{},
-			"status": "400",
-			"title":  "Bad request",
-		})
-	})
-
-	t.Run("SecretExchangeNoPayload", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
-
-		var oauthClient oauth.Client
-
-		oauthClient.RedirectURIs = []string{"abc"}
-		oauthClient.ClientName = "cozy-test"
-		oauthClient.SoftwareID = "github.com/cozy/cozy-test"
-		oauthClient.OnboardingSecret = "foobarsecret"
-		oauthClient.Create(testInstance)
-
-		e.POST("/auth/secret_exchange").
-			WithHeader("Content-Type", "application/json; charset=utf-8").
-			WithHeader("Accept", "application/json").
-			// No body
-			WithHost(domain).
-			Expect().Status(400).
-			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
-			Object().
-			Value("errors").Array().ContainsOnly(map[string]interface{}{
-			"detail": "EOF",
-			"source": map[string]interface{}{},
-			"status": "400",
-			"title":  "Bad Request",
-		})
 	})
 
 	t.Run("PassphraseOnboarding", func(t *testing.T) {
@@ -2103,7 +1881,7 @@ func TestAuth(t *testing.T) {
 				return testInstance.SessionSecret(), nil
 			}, &claims)
 			assert.NoError(t, err)
-			assert.Equal(t, consts.KonnectorAudience, claims.Audience)
+			assert.Equal(t, consts.KonnectorAudience, claims.Audience[0])
 			assert.Equal(t, domain, claims.Issuer)
 			assert.Equal(t, konnSlug, claims.Subject)
 			assert.Equal(t, "", claims.Scope)
@@ -2156,6 +1934,47 @@ func TestAuth(t *testing.T) {
 				WithHost(domain).
 				Expect().Status(404)
 		})
+	})
+
+	t.Run("Share by link protected by password", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		set := permission.Set{
+			permission.Rule{Type: consts.Files, Title: "files"},
+		}
+		parent := &permission.Permission{
+			Type:        permission.TypeWebapp,
+			Permissions: set,
+		}
+		sourceID := "io.cozy.apps/drive"
+		codes := map[string]string{"email": "123456789123456789"}
+		shortcodes := map[string]string{"email": "123456"}
+		md, err := metadata.NewWithApp("drive", "", permission.DocTypeVersion)
+		require.NoError(t, err)
+		subdoc := permission.Permission{
+			Permissions: set,
+			Password:    "the_password!",
+			Metadata:    md,
+		}
+		perm, err := permission.CreateShareSet(testInstance, parent, sourceID, codes, shortcodes, subdoc, nil)
+		require.NoError(t, err)
+
+		e.POST("/auth/share-by-link/password").
+			WithHeader("Accept", "application/json").
+			WithFormField("perm_id", perm.ID()).
+			WithFormField("password", "bad_password").
+			WithHost(domain).
+			Expect().Status(403)
+
+		res := e.POST("/auth/share-by-link/password").
+			WithHeader("Accept", "application/json").
+			WithFormField("perm_id", perm.ID()).
+			WithFormField("password", "the_password!").
+			WithHost(domain).
+			Expect().Status(200)
+
+		res.Cookies().Length().Equal(1)
+		res.Cookie("pass" + perm.ID()).Value().NotEmpty()
 	})
 
 	t.Run("MagicLink", func(t *testing.T) {
@@ -2266,7 +2085,7 @@ func assertValidToken(t *testing.T, testInstance *instance.Instance, token, audi
 		return testInstance.OAuthSecret, nil
 	}, &claims)
 	assert.NoError(t, err)
-	assert.Equal(t, audience, claims.Audience)
+	assert.Equal(t, audience, claims.Audience[0])
 	assert.Equal(t, domain, claims.Issuer)
 	assert.Equal(t, subject, claims.Subject)
 	assert.Equal(t, scope, claims.Scope)

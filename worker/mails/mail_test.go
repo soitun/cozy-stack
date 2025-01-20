@@ -35,7 +35,7 @@ func TestMails(t *testing.T) {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
 
-	config.UseTestFile()
+	config.UseTestFile(t)
 
 	setup := testutils.NewSetup(t, t.Name())
 
@@ -85,7 +85,8 @@ QUIT
 				Locale: "en",
 			}
 			j := &job.Job{JobID: "1", Domain: "cozy.example.com"}
-			ctx := job.NewWorkerContext("0", j, nil)
+			ctx, cancel := job.NewTaskContext("0", j, nil)
+			defer cancel()
 			return sendMail(ctx, msg, "cozy.example.com")
 		})
 	})
@@ -152,7 +153,8 @@ QUIT
 				Locale: "en",
 			}
 			j := &job.Job{JobID: "1", Domain: "cozy.example.com"}
-			ctx := job.NewWorkerContext("0", j, nil)
+			ctx, cancel := job.NewTaskContext("0", j, nil)
+			defer cancel()
 			return sendMail(ctx, msg, "cozy.example.com")
 		})
 	})
@@ -164,7 +166,8 @@ QUIT
 			Locale: "en",
 		}
 		j := &job.Job{JobID: "1", Domain: "cozy.example.com"}
-		ctx := job.NewWorkerContext("0", j, nil)
+		ctx, cancel := job.NewTaskContext("0", j, nil)
+		defer cancel()
 		err := sendMail(ctx, msg, "cozy.example.com")
 		if assert.Error(t, err) {
 			assert.Equal(t, "Missing mail subject", err.Error())
@@ -185,7 +188,8 @@ QUIT
 			Locale: "en",
 		}
 		j := &job.Job{JobID: "1", Domain: "cozy.example.com"}
-		ctx := job.NewWorkerContext("0", j, nil)
+		ctx, cancel := job.NewTaskContext("0", j, nil)
+		defer cancel()
 		err := sendMail(ctx, msg, "cozy.example.com")
 		if assert.Error(t, err) {
 			assert.Equal(t, "Unknown body content-type text/qsdqsd", err.Error())
@@ -193,7 +197,7 @@ QUIT
 	})
 
 	t.Run("send with NoReply", func(t *testing.T) {
-		sendMail = func(_ *job.WorkerContext, opts *mail.Options, domain string) error {
+		sendMail = func(_ *job.TaskContext, opts *mail.Options, domain string) error {
 			assert.NotNil(t, opts.From)
 			assert.NotNil(t, opts.To)
 			assert.Len(t, opts.To, 1)
@@ -220,14 +224,16 @@ QUIT
 			Message:    msg,
 			WorkerType: "sendmail",
 		})
-		err := SendMail(job.NewWorkerContext("123", j, inst))
+		ctx, cancel := job.NewTaskContext("123", j, inst)
+		defer cancel()
+		err := SendMail(ctx)
 		if assert.Error(t, err) {
 			assert.Equal(t, "yes", err.Error())
 		}
 	})
 
 	t.Run("send with From", func(t *testing.T) {
-		sendMail = func(_ *job.WorkerContext, opts *mail.Options, domain string) error {
+		sendMail = func(_ *job.TaskContext, opts *mail.Options, domain string) error {
 			assert.NotNil(t, opts.From)
 			assert.NotNil(t, opts.To)
 			assert.Len(t, opts.To, 1)
@@ -256,7 +262,45 @@ QUIT
 			Message:    msg,
 			WorkerType: "sendmail",
 		})
-		err := SendMail(job.NewWorkerContext("123", j, inst))
+		ctx, cancel := job.NewTaskContext("123", j, inst)
+		defer cancel()
+		err := SendMail(ctx)
+		if assert.Error(t, err) {
+			assert.Equal(t, "yes", err.Error())
+		}
+	})
+
+	t.Run("send campaign email", func(t *testing.T) {
+		sendMail = func(_ *job.TaskContext, opts *mail.Options, domain string) error {
+			assert.NotNil(t, opts.From)
+			assert.NotNil(t, opts.To)
+			assert.Len(t, opts.To, 1)
+			assert.Equal(t, "me@me", opts.To[0].Email)
+			assert.Equal(t, "noreply@"+inst.Domain, opts.From.Email)
+			assert.Equal(t, inst.Domain, domain)
+			return errors.New("yes")
+		}
+		defer func() {
+			sendMail = doSendMail
+		}()
+		msg, _ := job.NewMessage(mail.Options{
+			Mode:    mail.ModeCampaign,
+			Subject: "Awesome content",
+			Parts: []*mail.Part{
+				{
+					Type: "text/plain",
+					Body: "foo",
+				},
+			},
+			Locale: "en",
+		})
+		j := job.NewJob(inst, &job.JobRequest{
+			Message:    msg,
+			WorkerType: "sendmail",
+		})
+		ctx, cancel := job.NewTaskContext("123", j, inst)
+		defer cancel()
+		err := SendMail(ctx)
 		if assert.Error(t, err) {
 			assert.Equal(t, "yes", err.Error())
 		}
@@ -294,10 +338,10 @@ func mailServer(t *testing.T, serverString string, clientStrings []string, expec
 		readdata := false
 		readhead := false
 		for i := 0; i < len(data) && data[i] != ""; i++ {
-			_ = tc.PrintfLine(data[i])
+			_ = tc.PrintfLine("%s", data[i])
 			for len(data[i]) >= 4 && data[i][3] == '-' {
 				i++
-				_ = tc.PrintfLine(data[i])
+				_ = tc.PrintfLine("%s", data[i])
 			}
 			if data[i] == "221 Goodbye" {
 				return

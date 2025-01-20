@@ -11,6 +11,7 @@ import (
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
+	"github.com/cozy/cozy-stack/model/sharing"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -22,6 +23,10 @@ import (
 
 func passphraseResetForm(c echo.Context) error {
 	instance := middlewares.GetInstance(c)
+	if !instance.OnboardingFinished {
+		return middlewares.RenderNeedOnboarding(c, instance)
+	}
+
 	hasHint := false
 	if setting, err := settings.Get(instance); err == nil {
 		hasHint = setting.PassphraseHint != ""
@@ -30,23 +35,27 @@ func passphraseResetForm(c echo.Context) error {
 	if resp, err := couchdb.NormalDocs(instance, consts.BitwardenCiphers, 0, 1, "", false); err == nil {
 		hasCiphers = resp.Total > 0
 	}
-	showBackButton := true
-	if c.QueryParam("hideBackButton") == "true" {
-		showBackButton = false
+	backButton := ""
+	from := c.QueryParam("from")
+	if from != "" {
+		backButton = instance.SubDomain(from).String()
+	} else if c.QueryParam("hideBackButton") != "true" {
+		backButton = instance.PageURL("/auth/login", nil)
 	}
 	forcedOIDC := instance.HasForcedOIDC()
 	return c.Render(http.StatusOK, "passphrase_reset.html", echo.Map{
-		"Domain":         instance.ContextualDomain(),
-		"ContextName":    instance.ContextName,
-		"Locale":         instance.Locale,
-		"Title":          instance.TemplateTitle(),
-		"Favicon":        middlewares.Favicon(instance),
-		"CSRF":           c.Get("csrf"),
-		"Redirect":       c.QueryParam("redirect"),
-		"HasHint":        hasHint,
-		"HasCiphers":     hasCiphers,
-		"CozyPass":       forcedOIDC,
-		"ShowBackButton": showBackButton,
+		"Domain":      instance.ContextualDomain(),
+		"ContextName": instance.ContextName,
+		"Locale":      instance.Locale,
+		"Title":       instance.TemplateTitle(),
+		"Favicon":     middlewares.Favicon(instance),
+		"CSRF":        c.Get("csrf"),
+		"Redirect":    c.QueryParam("redirect"),
+		"HasHint":     hasHint,
+		"HasCiphers":  hasCiphers,
+		"CozyPass":    forcedOIDC,
+		"From":        from,
+		"BackButton":  backButton,
 	})
 }
 
@@ -59,20 +68,13 @@ func passphraseForm(c echo.Context) error {
 	}
 
 	if registerToken == "" || !middlewares.CheckRegisterToken(c, inst) {
-		return c.Render(http.StatusOK, "need_onboarding.html", echo.Map{
-			"Domain":       inst.ContextualDomain(),
-			"ContextName":  inst.ContextName,
-			"Locale":       inst.Locale,
-			"Title":        inst.TemplateTitle(),
-			"Favicon":      middlewares.Favicon(inst),
-			"SupportEmail": "contact@cozycloud.cc",
-		})
+		return middlewares.RenderNeedOnboarding(c, inst)
 	}
 
 	cryptoPolyfill := middlewares.CryptoPolyfill(c)
 	iterations := crypto.DefaultPBKDF2Iterations
 	if cryptoPolyfill {
-		iterations = crypto.EdgePBKDF2Iterations
+		iterations = crypto.MinPBKDF2Iterations
 	}
 
 	return c.Render(http.StatusOK, "passphrase_choose.html", echo.Map{
@@ -119,7 +121,8 @@ func sendHint(c echo.Context) error {
 
 func passphraseReset(c echo.Context) error {
 	i := middlewares.GetInstance(c)
-	if err := lifecycle.RequestPassphraseReset(i); err != nil && !errors.Is(err, instance.ErrResetAlreadyRequested) {
+	from := c.FormValue("from")
+	if err := lifecycle.RequestPassphraseReset(i, from); err != nil && !errors.Is(err, instance.ErrResetAlreadyRequested) {
 		return err
 	}
 	// Disconnect the user if it is logged in. The idea is that if the user
@@ -153,10 +156,6 @@ func passphraseReset(c echo.Context) error {
 
 func passphraseRenewForm(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
-	if middlewares.IsLoggedIn(c) {
-		redirect := inst.DefaultRedirection().String()
-		return c.Redirect(http.StatusSeeOther, redirect)
-	}
 
 	// Check that the token is actually defined and well encoded. The actual
 	// token value checking is also done on the passphraseRenew handler.
@@ -176,7 +175,7 @@ func passphraseRenewForm(c echo.Context) error {
 	cryptoPolyfill := middlewares.CryptoPolyfill(c)
 	iterations := crypto.DefaultPBKDF2Iterations
 	if cryptoPolyfill {
-		iterations = crypto.EdgePBKDF2Iterations
+		iterations = crypto.MinPBKDF2Iterations
 	}
 
 	return c.Render(http.StatusOK, "passphrase_choose.html", echo.Map{
@@ -186,6 +185,7 @@ func passphraseRenewForm(c echo.Context) error {
 		"Title":          inst.TemplateTitle(),
 		"Favicon":        middlewares.Favicon(inst),
 		"Action":         "/auth/passphrase_renew",
+		"From":           c.QueryParam("from"),
 		"Iterations":     iterations,
 		"Salt":           string(inst.PassphraseSalt()),
 		"ResetToken":     hex.EncodeToString(token),
@@ -196,13 +196,6 @@ func passphraseRenewForm(c echo.Context) error {
 
 func passphraseRenew(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
-	if middlewares.IsLoggedIn(c) {
-		redirect := inst.DefaultRedirection().String()
-		if wantsJSON(c) {
-			return c.JSON(http.StatusOK, echo.Map{"redirect": redirect})
-		}
-		return c.Redirect(http.StatusSeeOther, redirect)
-	}
 	pass := []byte(c.FormValue("passphrase"))
 	iterations, _ := strconv.Atoi(c.FormValue("iterations"))
 	token, err := hex.DecodeString(c.FormValue("passphrase_reset_token"))
@@ -235,12 +228,21 @@ func passphraseRenew(c echo.Context) error {
 			"error": "invalid_token",
 		})
 	}
-	if err := bitwarden.DeleteUnrecoverableCiphers(inst); err != nil {
-		inst.Logger().WithNamespace("bitwarden").
-			Warnf("Error on ciphers deletion after password reset: %s", err)
+	// Before deleting the ciphers, it will revoke the sharings to avoid deleting
+	// the ciphers on the Cozy instances of the other members.
+	if err := sharing.RevokeCipherSharings(inst); err == nil {
+		if err := bitwarden.DeleteUnrecoverableCiphers(inst); err != nil {
+			inst.Logger().WithNamespace("bitwarden").
+				Warnf("Error on ciphers deletion after password reset: %s", err)
+		}
 	}
 
 	redirect := inst.PageURL("/auth/login", nil)
+	if c.FormValue("from") == consts.SettingsSlug {
+		u := inst.SubDomain(consts.SettingsSlug)
+		u.Fragment = "/profile/email"
+		redirect = u.String()
+	}
 	if wantsJSON(c) {
 		return c.JSON(http.StatusOK, echo.Map{"redirect": redirect})
 	}

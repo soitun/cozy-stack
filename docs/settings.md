@@ -4,6 +4,7 @@
 
 ## Disk usage
 
+
 ### GET /settings/disk-usage
 
 Says how many bytes are available and used to store files. When not limited the
@@ -35,7 +36,6 @@ Content-Type: application/vnd.api+json
         "type": "io.cozy.settings",
         "id": "io.cozy.settings.disk-usage",
         "attributes": {
-            "is_limited": true,
             "quota": "123456789",
             "used": "12345678",
             "files": "10305070",
@@ -45,6 +45,142 @@ Content-Type: application/vnd.api+json
     }
 }
 ```
+
+## OAuth clients usage
+
+### GET /settings/clients-usage
+
+This endpoint returns the number of user-connected OAuth clients, the limit set
+on the Cozy and if this limit has been reached or even exceeded.
+If there is no limit, the `limit` attribute won't be present in the response.
+
+#### Request
+
+```
+GET /settings/clients-usage HTTP/1.1
+Host: alice.example.com
+Accept: application/vnd.api+json
+Authorization: Bearer ...
+```
+
+#### Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/vnd.api+json
+```
+
+```json
+{
+    "data": {
+        "type": "io.cozy.settings",
+        "id": "io.cozy.settings.clients-usage",
+        "attributes": {
+          "limit": 3,
+          "count": 3,
+          "limitReached": true,
+          "limitExceeded": false
+        }
+    }
+}
+```
+
+
+## Email update
+
+### POST /settings/email
+
+The email adress update process starts with this call. The password is required
+in order to make a strong authentication. This endpoint will send a confirmation
+email to the new address with a link. Once clicked, this link will redirect the
+user to the second endpoint.
+
+#### Request
+
+```http
+POST /settings/email HTTP/1.1
+Host: alice.example.com
+Content-Type: application/json
+Authorization: Bearer ...
+```
+
+```json
+{
+    "passphrase": "4f58133ea0f415424d0a856e0d3d2e0cd28e4358fce7e333cb524729796b2791",
+    "email": "alice@example.com"
+}
+```
+
+#### Response
+
+```http
+HTTP/1.1 204 No Content
+```
+
+### POST /settings/email/resend
+
+Once the email process is started, it's possible to resend an email in order to ensure
+the link delivery.
+
+#### Request
+
+```http
+POST /settings/email HTTP/1.1
+Host: alice.example.com
+Content-Type: application/json
+Authorization: Bearer ...
+```
+
+#### Response
+
+```http
+HTTP/1.1 204 No Content
+```
+
+### GET /settings/email/confirm
+
+This is the second part of the email update process. The user have received a
+confirmation email with a link on its new email adress. When he click on the link
+he ends up on this endpoint. The url contains a token used to authenticate the user
+and the action.
+
+#### Request
+
+```http
+GET /settings/email/confirm?token=XXXXXXX HTTP/1.1
+Host: alice.example.com
+```
+
+#### Response
+
+In case of success the user will be redirected to its setting page. In case of error
+an HTML error page will appears.
+
+```http
+HTTP/1.1 307 Temporary Redirect
+Location: http://alice-settings.cozy.localhost:8080
+```
+
+
+### DELETE /settings/email
+
+This endpoints allows to cancel the ongoing email adress update process.
+
+#### Request
+
+```http
+DELETE /settings/email HTTP/1.1
+Host: alice.example.com
+Content-Type: application/json
+Authorization: Bearer ...
+```
+
+#### Response
+
+```http
+HTTP/1.1 204 No Content
+```
+
 
 ## Passphrase
 
@@ -231,7 +367,7 @@ route is necessary to actually update the passphrase. See below.
 A `"force": true` parameter can be added in the JSON to force a passphrase on a
 Cozy where authentication by password is disabled and the vault is empty. It
 allows to use Cozy Pass when the authentication on the Cozy is delegated via
-OIDC. When forcing a password reset, you need to regenerate the 
+OIDC. When forcing a password reset, you need to regenerate the
 
 * public and private keys
 * encryption key
@@ -403,6 +539,25 @@ Content-Type: application/json
 HTTP/1.1 204 No Content
 ```
 
+### POST /settings/vault
+
+This route can be used to ensure the vault is initialized. If it is not the
+case, it will migrate the accounts from the konnectors accounts to the vault
+and will set the `extension_installed` flag.
+
+#### Request
+
+```http
+POST /settings/vault HTTP/1.1
+Host: alice.example.com
+```
+
+#### Response
+
+```http
+HTTP/1.1 204 No Content
+```
+
 ## Instance
 
 ### GET /settings/capabilities
@@ -462,10 +617,50 @@ Accept: application/vnd.api+json
 No permissions are required to access this route, but the request needs to be
 authenticated (webapp token, OAuth token, etc.).
 
+### GET /settings/external-ties
+
+List ties between the instance and external services such as a subscription
+vendor (e.g. mobile app stores).
+The current possible ties are:
+
+- `has_blocking_subscription` is true when the instance is linked to a premium
+  subscription paid via a third-party vendor that does not let us cancel the
+  subscription ourselves and requires it to be cancelled by the customer
+  themselves.
+
+#### Request
+
+```http
+GET /settings/external-ties HTTP/1.1
+Host: alice.example.com
+Accept: application/vnd.api+json
+```
+
+#### Response
+
+```json
+{
+    "data": {
+        "type": "io.cozy.settings",
+        "id": "io.cozy.settings.external-ties",
+        "attributes": {
+            "has_blocking_subscription": false
+        },
+        "links": {
+            "self": "/settings/external-ties"
+        }
+    }
+}
+```
+
+#### Permissions
+
+No permissions are required to access this route, but the request needs to be
+made from an authenticated Web session or Webapp.
+
 ### GET /settings/instance
 
-If the user is logged in, display all instance settings. If the user is not
-logged in, the register token can be used to read the informations.
+If the user is logged in, display all instance settings.
 
 #### Request
 
@@ -488,20 +683,35 @@ Cookie: sessionid=xxxx
         },
         "attributes": {
             "locale": "fr",
+            "password_defined": true,
             "auto_update": true,
             "email": "alice@example.com",
             "public_name": "Alice Martin",
             "auth_mode": "basic",
-            "default_redirection": "drive/#/folder"
+            "default_redirection": "drive/#/folder",
+            "context": "dev",
+            "sponsorships": ["springfield"],
+            "legal_notice_url": "https://manager.cozycloud.cc/e96388a5-8eed-44cc-81e6-40aad273f0d4.pdf"
         }
     }
 }
 ```
 
-#### Permissions
+##### Note about `password_defined`
 
-To use this endpoint, an application needs a permission on the type
-`io.cozy.settings` for the verb `GET`.
+There are a few fields that are persisted on the instance its-self, not on its
+settings document. When they are updated, it won't be reflected in the realtime
+when listening on the `io.cozy.settings.instance` document.
+
+For `password_defined`, it is possible to be notified when the password is
+defined by watching a synthetic document with the doctype `io.cozy.settings`,
+and the id `io.cozy.settings.passphrase`.
+
+##### Note about `legal_notice_url`
+
+This attribute will only be present if a manager is associated with the
+instance and the instance was created on behalf of a partner with a defined
+legal notice.
 
 ### POST /settings/instance/deletion
 
@@ -720,6 +930,37 @@ Content-Type: application/json
 This route requires the application to have permissions on the
 `io.cozy.sessions` doctype with the `GET` verb.
 
+### GET /settings/sessions/current
+
+This route returns information about the current session.
+
+```
+GET /settings/sessions/current HTTP/1.1
+Host: cozy.example.org
+Cookie: ...
+Authorization: Bearer ...
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{
+  "data": {
+    "id": "...",
+    "attributes": {
+      "last_seen": "",
+      "long_run": true
+    },
+    "meta": {
+      "rev": "..."
+    }
+  }
+}
+```
+
 ## OAuth 2 clients
 
 ### GET /settings/clients
@@ -796,6 +1037,32 @@ HTTP/1.1 204 No Content
 To use this endpoint, an application needs a permission on the type
 `io.cozy.oauth.clients` for the verb `DELETE` (only client-side apps).
 
+### GET /settings/clients/limit-exceeded
+
+Get an OAuth clients limit exceeded page if the instance has more connected
+OAuth clients than its limit allows or redirect the request to the `redirect`
+parameter's value.
+The `redirect` parameter is optional. By default, its value
+is the instance's default redirection.
+
+The page will auto-refresh every 20 seconds or when an OAuth client deletion is
+detected.
+
+#### Query-String
+
+| Parameter  | Description                                          |
+| ---------- | ---------------------------------------------------- |
+| redirect   | URL where to redirect when the limit is not exceeded |
+
+#### Request
+
+```http
+GET /settings/clients/limit-exceeded?redirect=https%3A%2F%2Falice-home.example.com%2F HTTP/1.1
+Host: alice.example.com
+Accept: application/vnd.api+json
+Cookie: sessionid=xxxx
+```
+
 ### POST /settings/synchronized
 
 Any OAuth2 client can make a request to this endpoint with its token, no
@@ -816,6 +1083,29 @@ Authorization: Bearer oauth2-access-token
 HTTP/1.1 204 No Content
 ```
 
+## Avatar
+
+### PUT /settings/avatar
+
+This route can be used to upload the avatar for an instance.
+
+#### Request
+
+```http
+PUT /settings/avatar HTTP/1.1
+Host: alice.cozy.example.net
+Authorization: Bearer token
+Content-Type: image/jpeg
+
+...
+```
+
+#### Response
+
+```http
+HTTP/1.1 204 No Content
+```
+
 ## Context
 
 ### GET /settings/onboarded
@@ -823,6 +1113,12 @@ HTTP/1.1 204 No Content
 It redirects the user to an application after the onboarding. The application is
 selected according to the context of the instance and the configuration of the
 stack.
+
+### GET /settings/install_flagship_app
+
+At the end of an onboarding, just after the password has been chosen, if the
+user is in a mobile browser, the stack will show a page to push them to install
+the flagship app.
 
 ### GET /settings/context
 

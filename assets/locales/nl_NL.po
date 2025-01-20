@@ -22,6 +22,9 @@ msgstr "Foto's"
 msgid "Tree Notes"
 msgstr "Notities"
 
+msgid "Tree Shared Drives"
+msgstr "Drives"
+
 msgid "Tree Shared with me"
 msgstr "Gedeeld met mij"
 
@@ -899,9 +902,6 @@ msgstr "IP-adres:"
 msgid "Mail New Connection Browser"
 msgstr "Webbrowser:"
 
-msgid "Mail New Connection OS"
-msgstr "Apparaat:"
-
 msgid "Mail New Connection Change Passphrase instruction"
 msgstr ""
 "Was je dit zelf? Dan kun je dit bericht negeren.\n"
@@ -1024,6 +1024,9 @@ msgstr "De Cozy-url is niet je e-mailadres."
 msgid "Sharing Discovery Submit"
 msgstr "Synchroniseren naar mijn Cozy"
 
+msgid "Sharing Discovery Shortcut Submit"
+msgstr "Synchroniseren naar mijn Cozy"
+
 msgid "Sharing No Cozy"
 msgstr "Heb je nog geen Cozy?"
 
@@ -1038,6 +1041,12 @@ msgstr "Ben je de url vergeten? Maak je geen zorgen."
 
 msgid "Sharing Forgotten URL email"
 msgstr "Zoek naar \"Cozy\" in je Postvak IN."
+
+msgid "Notifications Disk Quota Close Title"
+msgstr "You've reached 90% of your storage"
+
+msgid "Notifications Disk Quota Close Message"
+msgstr "You are using over 90% of your storage. Please delete files, or upgrade your offer to get more space."
 
 msgid "Notifications Disk Quota Subject"
 msgstr "Je hebt momenteel 90% van je beschikbare opslagruimte verbruikt."
@@ -1060,6 +1069,30 @@ msgstr ""
 
 msgid "Notifications Disk Quota free text"
 msgstr "Opslagruimte vrijmaken"
+
+msgid "Notifications OAuth Clients Subject"
+msgstr "You've exceeded the maximum number of devices allowed in your plan"
+
+msgid "Notifications OAuth Clients Title"
+msgstr "Important information: maximum number of devices exceeded"
+
+msgid "Notifications OAuth Clients Greeting"
+msgstr "Hello,"
+
+msgid "Notifications OAuth Clients Reason Device"
+msgstr "**You've exceeded the maximum number of devices allowed** when connecting **%s** to your Cozy."
+
+msgid "Notifications OAuth Clients Reason Limit"
+msgstr "Your plan allows you to connect up to **%.0f devices**."
+
+msgid "Notifications OAuth Clients Increase Limit"
+msgstr "To upgrade your Cozy, or simply support us, you can change your Cozy plan."
+
+msgid "Notifications OAuth Clients Offers Text"
+msgstr "Check our plans"
+
+msgid "Notifications OAuth Clients Devices Text"
+msgstr "Manage my devices"
 
 msgid "Terms of services have been updated"
 msgstr ""
@@ -1102,3 +1135,74 @@ msgstr "https://help.cozy.io/article/274-ie-11-not-supported"
 
 msgid "File copy Suffix"
 msgstr "kopie"
+
+msgid "Too Many OAuth Clients Title"
+msgstr "%s/%s connected devices"
+
+msgid "Too Many OAuth Clients Intro"
+msgstr "Your current offer allows you to connect %s devices at the same time"
+
+msgid "Too Many OAuth Clients More Text"
+msgstr "Learn more"
+
+msgid "Too Many OAuth Clients More Link"
+msgstr "https://help.cozy.io/maximum-number-of-connected-devices-allowed/"
+
+msgid "Too Many OAuth Clients Available Actions"
+msgstr "Disconnect one of your devices or change your Cozy offer to access your Cozy from this device."
+
+msgid "Too Many OAuth Clients Offers Btn"
+msgstr "See offers"
+
+msgid "Too Many OAuth Clients Settings Btn"
+msgstr "Manage my connected devices"
+
+msgid "Too Many OAuth Clients Refresh Btn"
+msgstr "Refresh"
+
+msgid "Asset not found"
+msgstr "Asset not found"
+
+msgid "Install flagship app Title"
+msgstr "Install the application to finish"
+
+msgid "Install flagship app Description"
+msgstr "Your Cozy has been successfully created, install the application to use it right now!"
+
+msgid "Install flagship app Install"
+msgstr "Install the Cozy app"
+
+msgid "Install flagship app Skip"
+msgstr "Continue in the browser"
+
+msgid "Share by link Password Title"
+msgstr "Enter the password to access the link"
+
+msgid "Share by link Password Field"
+msgstr "Password"
+
+msgid "Share by link Password Submit"
+msgstr "Continue"
+
+msgid "Share by link Password Invalid"
+msgstr "Invalid password"
+
+msgid "Onboarding Resend activation mail"
+msgstr "Send again the activation email"
+
+msgid "Onboarding Resend activation Title"
+msgstr "Check your emails!"
+
+msgid "Onboarding Resend activation Body"
+msgstr ""
+"We just sent you an activation link by email."
+
+msgid "Onboarding Resend activation Detail"
+msgstr ""
+"We prefer to warn you, this mail can be found in Spam, Notification or Social folders. Do not hesitate to take a look at these folders to find it."
+
+msgid "Push Sharing Shortcut Title"
+msgstr "A new share is available in your Cozy"
+
+msgid "Push Sharing Shortcut Message"
+msgstr "%s has shared %s with you."

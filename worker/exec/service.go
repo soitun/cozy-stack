@@ -37,7 +37,7 @@ type serviceWorker struct {
 	workDir string
 }
 
-func (w *serviceWorker) PrepareWorkDir(ctx *job.WorkerContext, i *instance.Instance) (workDir string, cleanDir func(), err error) {
+func (w *serviceWorker) PrepareWorkDir(ctx *job.TaskContext, i *instance.Instance) (workDir string, cleanDir func(), err error) {
 	cleanDir = func() {}
 	opts := &ServiceOptions{}
 	if err = ctx.UnmarshalMessage(&opts); err != nil {
@@ -94,22 +94,20 @@ func (w *serviceWorker) PrepareWorkDir(ctx *job.WorkerContext, i *instance.Insta
 	// Check if the trigger is orphan
 	if triggerID, ok := ctx.TriggerID(); ok && service.TriggerID != "" {
 		if triggerID != service.TriggerID {
-			// Check if this is another trigger for the same declared service
+			// Check if this is another trigger for the same declared service.
+			// Note that the trigger may be not found if it was an @at.
 			var tInfos job.TriggerInfos
-			err = couchdb.GetDoc(i, consts.Triggers, triggerID, &tInfos)
-			if err != nil {
-				err = job.BadTriggerError{Err: fmt.Errorf("Trigger %q not found", triggerID)}
-				return
-			}
-			var msg ServiceOptions
-			err = json.Unmarshal(tInfos.Message, &msg)
-			if err != nil {
-				err = job.BadTriggerError{Err: fmt.Errorf("Trigger %q has bad message structure", triggerID)}
-				return
-			}
-			if msg.Name != name {
-				err = job.BadTriggerError{Err: fmt.Errorf("Trigger %q is orphan", triggerID)}
-				return
+			if err = couchdb.GetDoc(i, consts.Triggers, triggerID, &tInfos); err == nil {
+				var msg ServiceOptions
+				err = json.Unmarshal(tInfos.Message, &msg)
+				if err != nil {
+					err = job.BadTriggerError{Err: fmt.Errorf("Trigger %q has bad message structure", triggerID)}
+					return
+				}
+				if msg.Name != name {
+					err = job.BadTriggerError{Err: fmt.Errorf("Trigger %q is orphan", triggerID)}
+					return
+				}
 			}
 		}
 	}
@@ -157,7 +155,7 @@ func (w *serviceWorker) Slug() string {
 	return w.slug
 }
 
-func (w *serviceWorker) PrepareCmdEnv(ctx *job.WorkerContext, i *instance.Instance) (cmd string, env []string, err error) {
+func (w *serviceWorker) PrepareCmdEnv(ctx *job.TaskContext, i *instance.Instance) (cmd string, env []string, err error) {
 	type serviceEvent struct {
 		Doc interface{} `json:"doc"`
 	}
@@ -195,7 +193,7 @@ func (w *serviceWorker) PrepareCmdEnv(ctx *job.WorkerContext, i *instance.Instan
 	return
 }
 
-func (w *serviceWorker) Logger(ctx *job.WorkerContext) *logger.Entry {
+func (w *serviceWorker) Logger(ctx *job.TaskContext) logger.Logger {
 	log := ctx.Logger().WithField("slug", w.Slug())
 	if w.name != "" {
 		log = log.WithField("name", w.name)
@@ -203,7 +201,7 @@ func (w *serviceWorker) Logger(ctx *job.WorkerContext) *logger.Entry {
 	return log
 }
 
-func (w *serviceWorker) ScanOutput(ctx *job.WorkerContext, i *instance.Instance, line []byte) error {
+func (w *serviceWorker) ScanOutput(ctx *job.TaskContext, i *instance.Instance, line []byte) error {
 	var msg struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
@@ -235,7 +233,7 @@ func (w *serviceWorker) Error(i *instance.Instance, err error) error {
 	return err
 }
 
-func (w *serviceWorker) Commit(ctx *job.WorkerContext, errjob error) error {
+func (w *serviceWorker) Commit(ctx *job.TaskContext, errjob error) error {
 	log := w.Logger(ctx)
 	if errjob == nil {
 		log.Info("Service success")

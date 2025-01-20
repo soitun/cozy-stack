@@ -70,6 +70,8 @@ const (
 	Permissions = "io.cozy.permissions"
 	// Contacts doc type for sharing
 	Contacts = "io.cozy.contacts"
+	// Groups of contacts doc type for sharing
+	Groups = "io.cozy.contacts.groups"
 	// RemoteRequests doc type for logging requests to remote websites
 	RemoteRequests = "io.cozy.remote.requests"
 	// RemoteSecrets doc type for secrets used by remote doctypes
@@ -134,4 +136,14 @@ const (
 	// AuthConfirmations doc type used for realtime events when confirming
 	// authentication.
 	AuthConfirmations = "io.cozy.auth.confirmations"
+	// SourceAccountIdentifier doc type is used to link a directory to the
+	// konnector account that imports documents inside it.
+	SourceAccountIdentifier = "io.cozy.accounts.sourceAccountIdentifier"
+	// NextCloudFiles doc type is used when listing files from a NextCloud via
+	// WebDAV.
+	NextCloudFiles = "io.cozy.remote.nextcloud.files"
+	// ChatConversations doc type is used for a chat between the user and a chatbot.
+	ChatConversations = "io.cozy.ai.chat.conversations"
+	// ChatEvents doc type is used for RAG events about a chat conversation.
+	ChatEvents = "io.cozy.ai.chat.events"
 )

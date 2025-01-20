@@ -13,7 +13,7 @@ install:
 
 ## run: start the cozy-stack for local development
 run:
-	@go run . serve --mailhog --fs-url=file://localhost${PWD}/storage --konnectors-cmd ${PWD}/scripts/konnector-node-run.sh
+	@go run . serve --mailhog --fs-url=file://localhost${PWD}/storage --konnectors-cmd ${PWD}/scripts/konnector-dev-run.sh
 .PHONY: run
 
 ## instance: create an instance for local development
@@ -26,11 +26,11 @@ lint: scripts/golangci-lint
 .PHONY: lint
 
 scripts/golangci-lint: Makefile
-	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./scripts v1.52.0
+	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./scripts v1.63.1
 
 ## jslint: enforce a consistent code style for Js code
 jslint: scripts/node_modules
-	@scripts/node_modules/.bin/eslint -c scripts/eslintrc.json "assets/scripts/**" tests/integration/konnector/*.js
+	@scripts/node_modules/.bin/eslint -c scripts/eslint.config.js "assets/scripts/**" tests/system/konnector/*.js
 .PHONY: jslint
 
 ## pretty: make the assets prettier
@@ -44,8 +44,8 @@ svgo: scripts/node_modules
 	@scripts/node_modules/.bin/svgo -r -f assets/icons
 	@scripts/node_modules/.bin/svgo -r -f assets/images --exclude relocation-animated.svg
 
-scripts/node_modules: Makefile scripts/package.json scripts/yarn.lock
-	@cd scripts && yarn
+scripts/node_modules: Makefile scripts/package.json scripts/package-lock.json
+	@cd scripts && npm install
 
 ## assets: package the assets as go code
 assets: web/statik/statik.go
@@ -74,10 +74,10 @@ unit-tests:
 	@go test -p 1 -timeout 2m -short ./...
 .PHONY: unit-tests
 
-## integration-tests: run the tests
-integration-tests:
-	@scripts/integration-test.sh
-.PHONY: integration-tests
+## system-tests: run the tests
+system-tests:
+	@scripts/system-test.sh
+.PHONY: system-tests
 
 ## clean: clean the generated files and directories
 clean:

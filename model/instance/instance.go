@@ -1,10 +1,14 @@
+// Package instance is for the instance model, with domain, locale, settings,
+// etc.
 package instance
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -23,6 +27,8 @@ import (
 	"github.com/cozy/cozy-stack/pkg/lock"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
+	"github.com/cozy/cozy-stack/pkg/realtime"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/afero"
 )
 
@@ -32,6 +38,8 @@ const DefaultTemplateTitle = "Cozy"
 
 // PBKDF2_SHA256 is the value of kdf for using PBKDF2 with SHA256 to hash the
 // password on client side.
+//
+//lint:ignore ST1003 we prefer ALL_CAPS here
 const PBKDF2_SHA256 = 0
 
 // An Instance has the informations relatives to the logical cozy instance,
@@ -48,6 +56,7 @@ type Instance struct {
 	OIDCID          string   `json:"oidc_id,omitempty"`          // An identifier to check authentication from OIDC
 	FranceConnectID string   `json:"franceconnect_id,omitempty"` // An identifier to check authentication from FranceConnect
 	ContextName     string   `json:"context,omitempty"`          // The context attached to the instance
+	Sponsorships    []string `json:"sponsorships,omitempty"`     // The list of sponsorships for the instance
 	TOSSigned       string   `json:"tos,omitempty"`              // Terms of Service signed version
 	TOSLatest       string   `json:"tos_latest,omitempty"`       // Terms of Service latest version
 	AuthMode        AuthMode `json:"auth_mode,omitempty"`        // 2 factor authentication
@@ -59,8 +68,10 @@ type Instance struct {
 	NoAutoUpdate    bool     `json:"no_auto_update,omitempty"`  // Whether or not the instance has auto updates for its applications
 
 	OnboardingFinished bool  `json:"onboarding_finished,omitempty"` // Whether or not the onboarding is complete.
-	BytesDiskQuota     int64 `json:"disk_quota,string,omitempty"`   // The total size in bytes allowed to the user
-	IndexViewsVersion  int   `json:"indexes_version,omitempty"`
+	PasswordDefined    *bool `json:"password_defined"`              // 3 possibles states: true, false, and unknown (for legacy reasons)
+
+	BytesDiskQuota    int64 `json:"disk_quota,string,omitempty"` // The total size in bytes allowed to the user
+	IndexViewsVersion int   `json:"indexes_version,omitempty"`
 
 	// Swift layout number:
 	// - 0 for layout v1
@@ -98,6 +109,10 @@ type Instance struct {
 	FeatureFlags map[string]interface{} `json:"feature_flags,omitempty"`
 	// FeatureSets is a list of feature sets from the manager
 	FeatureSets []string `json:"feature_sets,omitempty"`
+
+	// LastActivityFromDeletedOAuthClients is the date of the last activity for
+	// OAuth clients that have been deleted
+	LastActivityFromDeletedOAuthClients *time.Time `json:"last_activity_from_deleted_oauth_clients,omitempty"`
 
 	vfs              vfs.VFS
 	contextualDomain string
@@ -225,10 +240,6 @@ func (i *Instance) MakeVFS() error {
 		i.vfs, err = vfsafero.New(i, index, disk, mutex, fsURL, i.DirName())
 	case config.SchemeSwift, config.SchemeSwiftSecure:
 		switch i.SwiftLayout {
-		case 0:
-			i.vfs, err = vfsswift.New(i, index, disk, mutex)
-		case 1:
-			i.vfs, err = vfsswift.NewV2(i, index, disk, mutex)
 		case 2:
 			i.vfs, err = vfsswift.NewV3(i, index, disk, mutex)
 		default:
@@ -238,6 +249,29 @@ func (i *Instance) MakeVFS() error {
 		err = fmt.Errorf("instance: unknown storage provider %s", fsURL.Scheme)
 	}
 	return err
+}
+
+// AvatarFS returns the hidden filesystem for storing the avatar.
+func (i *Instance) AvatarFS() vfs.Avatarer {
+	fsURL := config.FsURL()
+	switch fsURL.Scheme {
+	case config.SchemeFile:
+		baseFS := afero.NewBasePathFs(afero.NewOsFs(),
+			path.Join(fsURL.Path, i.DirName(), vfs.ThumbsDirName))
+		return vfsafero.NewAvatarFs(baseFS)
+	case config.SchemeMem:
+		baseFS := vfsafero.GetMemFS(i.DomainName() + "-avatar")
+		return vfsafero.NewAvatarFs(baseFS)
+	case config.SchemeSwift, config.SchemeSwiftSecure:
+		switch i.SwiftLayout {
+		case 2:
+			return vfsswift.NewAvatarFsV3(config.GetSwiftConnection(), i)
+		default:
+			panic(ErrInvalidSwiftLayout)
+		}
+	default:
+		panic(fmt.Sprintf("instance: unknown storage provider %s", fsURL.Scheme))
+	}
 }
 
 // ThumbsFS returns the hidden filesystem for storing the thumbnails of the
@@ -254,10 +288,6 @@ func (i *Instance) ThumbsFS() vfs.Thumbser {
 		return vfsafero.NewThumbsFs(baseFS)
 	case config.SchemeSwift, config.SchemeSwiftSecure:
 		switch i.SwiftLayout {
-		case 0:
-			return vfsswift.NewThumbsFs(config.GetSwiftConnection(), i.Domain)
-		case 1:
-			return vfsswift.NewThumbsFsV2(config.GetSwiftConnection(), i)
 		case 2:
 			return vfsswift.NewThumbsFsV3(config.GetSwiftConnection(), i)
 		default:
@@ -268,9 +298,50 @@ func (i *Instance) ThumbsFS() vfs.Thumbser {
 	}
 }
 
+// EnsureSharedDrivesDir returns the Shared Drives directory, and creates it if
+// it doesn't exist
+func (i *Instance) EnsureSharedDrivesDir() (*vfs.DirDoc, error) {
+	fs := i.VFS()
+	dir, err := fs.DirByID(consts.SharedDrivesDirID)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if dir != nil {
+		return dir, nil
+	}
+
+	name := i.Translate("Tree Shared Drives")
+	dir, err = vfs.NewDirDocWithPath(name, consts.RootDirID, "/", nil)
+	if err != nil {
+		return nil, err
+	}
+	dir.DocID = consts.SharedDrivesDirID
+	dir.CozyMetadata = vfs.NewCozyMetadata(i.PageURL("/", nil))
+	err = fs.CreateDir(dir)
+	if errors.Is(err, os.ErrExist) {
+		dir, err = fs.DirByPath(dir.Fullpath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dir, nil
+}
+
 // NotesLock returns a mutex for the notes on this instance.
 func (i *Instance) NotesLock() lock.ErrorRWLocker {
 	return config.Lock().ReadWrite(i, "notes")
+}
+
+func (i *Instance) SetPasswordDefined(defined bool) {
+	if (i.PasswordDefined == nil || !*i.PasswordDefined) && defined {
+		doc := couchdb.JSONDoc{
+			Type: consts.Settings,
+			M:    map[string]interface{}{"_id": consts.PassphraseParametersID},
+		}
+		realtime.GetHub().Publish(i, realtime.EventCreate, &doc, nil)
+	}
+
+	i.PasswordDefined = &defined
 }
 
 // SettingsDocument returns the document with the settings of this instance
@@ -391,6 +462,17 @@ func (i *Instance) Registries() []*url.URL {
 	return context
 }
 
+// RAGServer returns the RAG server for the instance (AI features).
+func (i *Instance) RAGServer() config.RAGServer {
+	contexts := config.GetConfig().RAGServers
+	if i.ContextName != "" {
+		if server, ok := contexts[i.ContextName]; ok {
+			return server
+		}
+	}
+	return contexts[config.DefaultInstanceContext]
+}
+
 // HasForcedOIDC returns true only if the instance is in a context where the
 // config says that the stack shouldn't allow to authenticate with the
 // password.
@@ -487,6 +569,14 @@ func (i *Instance) ChangePasswordURL() string {
 	return u.String()
 }
 
+// DataProxyCleanURL returns the URL of the DataProxy iframe for cleaning
+// PouchDB.
+func (i *Instance) DataProxyCleanURL() string {
+	u := i.SubDomain(consts.DataProxySlug)
+	u.Path = "/reset"
+	return u.String()
+}
+
 // FromURL normalizes a given url with the scheme and domain of the instance.
 func (i *Instance) FromURL(u *url.URL) string {
 	u2 := url.URL{
@@ -512,21 +602,6 @@ func (i *Instance) PageURL(path string, queries url.Values) string {
 		RawQuery: query,
 	}
 	return u.String()
-}
-
-// PublicName returns the settings' public name or a default one if missing
-func (i *Instance) PublicName() (string, error) {
-	doc, err := i.SettingsDocument()
-	if err != nil {
-		return "", err
-	}
-	publicName, _ := doc.M["public_name"].(string)
-	// if the public name is not defined, use the instance's domain
-	if publicName == "" {
-		split := strings.Split(i.Domain, ".")
-		publicName = split[0]
-	}
-	return publicName, nil
 }
 
 func (i *Instance) parseRedirectAppAndRoute(redirect string) *url.URL {
@@ -667,10 +742,10 @@ func (i *Instance) MakeJWT(audience, subject, scope, sessionID string, issuedAt 
 		return "", err
 	}
 	return crypto.NewJWT(secret, permission.Claims{
-		StandardClaims: crypto.StandardClaims{
-			Audience: audience,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Audience: jwt.ClaimStrings{audience},
 			Issuer:   i.Domain,
-			IssuedAt: issuedAt.Unix(),
+			IssuedAt: jwt.NewNumericDate(issuedAt),
 			Subject:  subject,
 		},
 		Scope:     scope,
@@ -728,6 +803,15 @@ func (i *Instance) MovedError() *jsonapi.Error {
 		}
 	}
 	return &jerr
+}
+
+func (i *Instance) HasPremiumLinksEnabled() bool {
+	if ctxSettings, ok := i.SettingsContext(); ok {
+		if enabled, ok := ctxSettings["enable_premium_links"].(bool); ok {
+			return enabled
+		}
+	}
+	return false
 }
 
 // ensure Instance implements couchdb.Doc

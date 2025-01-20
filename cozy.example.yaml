@@ -11,6 +11,15 @@
 # variable. The template is evaluated at startup of the stack.
 
 # server host - flags: --host
+#
+# Specifies on which IP/domain the server will listen on. It also defines which
+# IP versions will be available (IPv4 and/or IPv6). The server will be available
+# only on the IP version you have defined in host. For domains it will favour
+# the IPv4 version if available.
+#
+# There are two values with custom behaviours:
+# - "localhost" -> will listen on both "127.0.0.1" on IPv4 and "[::1]" on IPv6
+# - "0.0.0.0" and "[::]" -> will listen on both "0.0.0.0" on IPv4 and "[::]" on IPv6
 host: localhost
 # server port - flags: --port -p
 port: 8080
@@ -47,9 +56,9 @@ admin:
 # to generate the keys
 vault:
   # the path to the key used to encrypt credentials
-  credentials_encryptor_key: /path/to/key.enc
+  # credentials_encryptor_key: /path/to/key.enc
   # the path to the key used to decrypt credentials
-  credentials_decryptor_key: /path/to/key.dec
+  # credentials_decryptor_key: /path/to/key.dec
 
 # file system parameters
 fs:
@@ -110,6 +119,9 @@ jobs:
   # path to the imagemagick convert binary
   # imagemagick_convert_cmd: convert
 
+  # path to the ghostscript binary
+  # ghostscript_cmd: gs
+
   # Specify whether the given list of jobs is an allowlist or blocklist. In case
   # of an allowlist, all jobs are deactivated by default and only the listed one
   # are activated.
@@ -134,10 +146,13 @@ jobs:
   #   - "service":           launching services
   #   - "migrations":        transforming a VFS with Swift to layout v3
   #   - "notes-save":        saving notes to the VFS
+  #   - "rag-index":         send data to the RAG server for being indexed
+  #   - "rag-query":         send a query to the RAG server
   #   - "push":              sending push notifications
   #   - "sms":               sending SMS notifications
   #   - "sendmail":          sending mails
-  #   - "share-replicate":   for cozy to cozy sharing
+  #   - "share-group":       for cozy to cozy sharing
+  #   - "share-replicate":   idem
   #   - "share-track":       idem
   #   - "share-upload":      idem
   #   - "thumbnail":         creatings and deleting thumbnails for images
@@ -145,7 +160,6 @@ jobs:
   #   - "trash-files":       async deletion of files in the trash
   #   - "clean-old-trashed": deletion of old files and directories after some time
   #   - "unzip":             unzipping tarball
-  #   - "updates":           run updates for installed applications (deprecated)
   #   - "zip":               creating a zip tarball
   #
   # When no configuration is given for a worker, a default configuration is
@@ -184,38 +198,97 @@ jobs:
 # konnectors execution parameters for executing external processes.
 konnectors:
   cmd: ./scripts/konnector-node-run.sh # run connectors with node
+  # cmd: ./scripts/konnector-node-run.sh # run connectors with node in dev mode
   # cmd: ./scripts/konnector-rkt-run.sh # run connectors with rkt
   # cmd: ./scripts/konnector-nsjail-node8-run.sh # run connectors with nsjail
+
+# rag are the URL of the RAG server(s) for AI.
+rag:
+  # A cozy will use the rag server for its context, or if the context is not
+  # declared, for default.
+  default:
+    url: http://localhost:8000
+    api_key: $3cr3t
+  beta:
+    url: http://localhost:8001
+    api_key: $3cr3t
 
 # mail service parameters for sending email via SMTP
 mail:
   # mail noreply address - flags: --mail-noreply-address
   noreply_address: noreply@localhost
   noreply_name: My Cozy
-  reply_to: support@cozycloud.cc
+  reply_to: support@example.org
   # mail smtp host - flags: --mail-host
   host: smtp.home
   # mail smtp port - flags: --mail-port
-  port: 465
+  port: 587
   # mail smtp username - flags: --mail-username
   username: {{.Env.COZY_MAIL_USERNAME}}
   # mail smtp password - flags: --mail-password
   password: {{.Env.COZY_MAIL_PASSWORD}}
-  # disable mail tls - flags: --mail-disable-tls
+  # Use SSL connection (SMTPS)
+  # Means no STARTTLS
+  # flags: --mail-use-ssl
+  use_ssl: false
+  # disable mail STARTTLS
+  # Means using plain unencrypted SMTP
+  # flags: --mail-disable-tls
   disable_tls: false
   # skip the certificate validation (may be useful on localhost)
   skip_certificate_validation: false
+  # Local Name
+  # The hostname sent to the SMTP server with the HELO command
+  # Defaults to localhost
+  # flags: --mail-local-name
+  local_name: cozy.domain.example
   # It is also possible to override the mail server per context.
   contexts:
     beta:
       # If the host is set to "-", no mail will be sent on this context
-      host: smtp.cozy.beta
-      port: 465
+      host: smtp.example.org
+      port: 587
       username: {{.Env.COZY_BETA_MAIL_USERNAME}}
       password: {{.Env.COZY_BETA_MAIL_PASSWORD}}
 
-# directory with the hooks scripts - flags: --hooks
-hooks: ./scripts/hooks
+# campaign mail service parameters for sending campaign emails via SMTP
+# If campaign_mail.host is empty, the default mail config will be used.
+campaign_mail:
+  # SMTP server host
+  # Defaults to empty string
+  host: smtp.home
+  # SMTP server port
+  # Defaults to 25
+  port: 587
+  # SMTP server username
+  # Defaults to empty string
+  username: {{.Env.COZY_MAIL_USERNAME}}
+  # SMTP server password
+  # Defaults to empty string
+  password: {{.Env.COZY_MAIL_PASSWORD}}
+  # Use SSL connection (SMTPS)
+  # Means no STARTTLS
+  # Defaults to false
+  use_ssl: false
+  # Disable STARTTLS for SMTP server
+  # Means using plain unencrypted SMTP
+  # Defaults to true
+  disable_tls: false
+  # Skip the certificate validation (may be useful on localhost)
+  # Defaults to false
+  skip_certificate_validation: false
+  # Local Name
+  # The hostname sent to the SMTP server with the HELO command
+  # Defaults to empty string
+  local_name: cozy.domain.example
+  # It is also possible to override the campaign mail config per context.
+  contexts:
+    beta:
+      # If the host is set to "-", no mail will be sent on this context
+      host: smtp.example.org
+      port: 587
+      username: {{.Env.COZY_BETA_MAIL_USERNAME}}
+      password: {{.Env.COZY_BETA_MAIL_PASSWORD}}
 
 # location of the database for IP -> City lookups - flags: --geodb
 # See https://dev.maxmind.com/geoip/geoip2/geolite2/
@@ -277,25 +350,41 @@ move:
 # OnlyOffice server for collaborative edition of office documents
 office:
   default:
-    onlyoffice_url: https://documentserver.cozycloud.cc/
+    onlyoffice_url: https://documentserver.example.org/
     onlyoffice_inbox_secret: inbox_secret
     onlyoffice_outbox_secret: outbox_secret
 
 # [internal usage] Cloudery configuration
-clouderies:
-  default:
-    api:
-      url: https://manager.cozycloud.cc/
-      token: xxxxxx
+# clouderies:
+#   default:
+#     api:
+#       url: https://manager.example.org/
+#       token: xxxxxx
+
+# All the deprecated apps listed here will see their OAUTH2 Authorization
+# flow interupted and redirected to a page proposing to move to the new
+# cozy application.
+#
+# The keys for `store_urls` can be: iphone/android/other
+deprecated_apps:
+  apps:
+#     - software_id: "github.com/cozy/some-app"
+#       name: "some-app"
+#       store_urls:
+#         iphone: https://some-apple-store-url
+#         android: https://some-android-store-url
+
+# The list of authorized hosts to redirect to when using the authentication
+# confirm endpoint.
+authorized_hosts_for_confirm_auth:
+  - sometool.example.org
 
 notifications:
   # Activate development APIs (iOS only)
   development: false
 
-  # Firebase Cloud Messaging API Key for Android notifications
-  # android_api_key: ""
-  # Use this key to run end to test with a fake FCM server
-  # fcm_server: "http://localhost:3001"
+  # Firebase Cloud Messaging API
+  # fcm_credentials_file: /etc/cozy/fcm_credentials.json
 
   # APNS/2 certificates for iOS notifications
   # ios_certificate_key_path: path/to/certificate.p12
@@ -311,7 +400,7 @@ notifications:
   contexts:
     beta:
       provider: api_sen
-      url: https://sms.cozy.beta/api/send
+      url: https://sms.example.org/api/send
       token: {{.Env.COZY_BETA_SMS_TOKEN}}
 
 flagship:
@@ -323,6 +412,10 @@ flagship:
     - io.cozy.flagship.mobile
   apk_certificate_digests:
     - 'xNnH7T1BSDh6erMzNysfakBVLLacbSbOMxVk8jEPgdU='
+  play_integrity_decryption_keys:
+    - 'bVcBAv0eO64NKIvDoRHpnTOZVxAkhMuFwRHrTEMr23U='
+  play_integrity_verification_keys:
+    - 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElTF2uARN7oxfoDWyERYMe6QutI2NqS+CAtVmsPDIRjBBxF96fYojFVXRRsMb86PjkE21Ol+sO1YuspY+YuDRMw=='
   apple_app_ids:
     - 3AKXFMV43J.io.cozy.drive.mobile
     - 3AKXFMV43J.io.cozy.flagship.mobile
@@ -390,15 +483,15 @@ contexts:
     # Allows to override the default template "Cozy" title by your own title
     templates_title: "My Personal Cloud"
     # Use a different noreply mail for this context
-    noreply_address: noreply@cozy.beta
+    noreply_address: noreply@example.org
     noreply_name: My Cozy Beta
-    reply_to: support@cozy.beta
+    reply_to: support@example.org
     # Configure the error page
-    support_address: support@cozy.beta
+    support_address: support@example.org
     # Change the limit on the number of members for a sharing
     max_members_per_sharing: 50
     # Use a different wizard for moving a Cozy
-    move_url: htts://move.cozy.beta/
+    move_url: https://move.example.org/
     # Feature flags
     features:
       - hide_konnector_errors
@@ -406,3 +499,28 @@ contexts:
     # permissions have changed
     additional_platform_apps:
       - superapp
+    # Provides custom logo used in some cozy app (e.g. Home footer)
+    # Use type key if you want defined a logo as main
+    logos:
+      coachco2:
+        light:
+          - src: /logos/main_cozy.png
+            alt: Cozy Cloud
+        dark:
+          - src: /logos/main_cozy.png
+            alt: Cozy Cloud
+      home:
+        light:
+          - src: /logos/main_cozy.png
+            alt: Cozy Cloud
+            type: main
+          - src: /logos/1_partner.png
+            alt: Partner n°1
+            type: secondary
+        dark:
+          - src: /logos/main_cozy.png
+            alt: Cozy Cloud
+            type: main
+          - src: /logos/1_partner.png
+            alt: Partner n°1
+            type: secondary

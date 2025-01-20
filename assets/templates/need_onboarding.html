@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="{{asset .Domain "/styles/cirrus.css" .ContextName}}">
     {{.Favicon}}
   </head>
-  <body class="theme-inverted">
+  <body class="cirrus theme-inverted">
     <main class="wrapper">
       <header class="wrapper-top">
         <a href="https://cozy.io/" class="btn p-2 d-sm-none">
@@ -29,6 +29,13 @@
         <p class="text-center mb-3">
           <strong>{{t "Error Contact us" }} <a href="mailto:{{.SupportEmail}}">{{.SupportEmail}}</a>.</strong>
         </p>
+        {{if .UUID}}
+        <form id="resend-activate-form" method="POST" action="/auth/onboarding/resend" class="d-contents">
+          <button class="btn btn-primary btn-md-lg w-100 my-3 mt-md-5" type="submit">
+            {{t "Onboarding Resend activation mail"}}
+          </button>
+        </form>
+        {{end}}
       </footer>
     </main>
     <script src="{{asset .Domain "/scripts/cirrus.js"}}"></script>

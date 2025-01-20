@@ -124,6 +124,48 @@ func GetNote(c echo.Context) error {
 	return files.FileData(c, http.StatusOK, file, false, nil)
 }
 
+func GetNoteText(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	fileID := c.Param("id")
+	file, err := inst.VFS().FileByID(fileID)
+	if err != nil {
+		return wrapError(err)
+	}
+
+	if err := middlewares.AllowVFS(c, permission.GET, file); err != nil {
+		return err
+	}
+
+	content, err := note.GetText(inst, file)
+	if err != nil {
+		return wrapError(err)
+	}
+	return c.String(http.StatusOK, content)
+}
+
+func GetTexts(c echo.Context) error {
+	inst := middlewares.GetInstance(c)
+	ids := strings.Split(c.QueryParam("ids"), ",")
+	texts := make(map[string]string)
+
+	for _, id := range ids {
+		file, err := inst.VFS().FileByID(id)
+		if err != nil {
+			return wrapError(err)
+		}
+		if err := middlewares.AllowVFS(c, permission.GET, file); err != nil {
+			return err
+		}
+		content, err := note.GetText(inst, file)
+		if err != nil {
+			return wrapError(err)
+		}
+		texts[id] = content
+	}
+
+	return c.JSON(http.StatusOK, texts)
+}
+
 // GetSteps is the API handler for GET /notes/:id/steps?Version=xxx. It returns
 // the steps since the given version. If the version is too old, and the steps
 // are no longer available, it returns a 412 response with the whole document
@@ -281,7 +323,7 @@ func ForceNoteSync(c echo.Context) error {
 func OpenNoteURL(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
 	fileID := c.Param("id")
-	open, err := note.Open(inst, fileID)
+	open, err := sharing.OpenNote(inst, fileID)
 	if err != nil {
 		return wrapError(err)
 	}
@@ -370,7 +412,7 @@ func UploadImage(c echo.Context) error {
 			return jsonapi.InvalidParameter(echo.HeaderContentLength, err)
 		}
 		if size > note.MaxImageWeight {
-			return jsonapi.Errorf(http.StatusRequestEntityTooLarge, "%s", vfs.ErrFileTooBig)
+			return jsonapi.Errorf(http.StatusRequestEntityTooLarge, "%s", vfs.ErrMaxFileSize)
 		}
 		used, err := inst.VFS().FilesUsage()
 		if err != nil {
@@ -403,6 +445,38 @@ func UploadImage(c echo.Context) error {
 	return jsonapi.Data(c, http.StatusCreated, image, nil)
 }
 
+// CopyImage is the API handler for POST /notes/:id/:image-id/copy. It copies
+// an existing image to another note.
+func CopyImage(c echo.Context) error {
+	// Check permission
+	inst := middlewares.GetInstance(c)
+	srcDoc, err := inst.VFS().FileByID(c.Param("id"))
+	if err != nil {
+		return wrapError(err)
+	}
+	if err := middlewares.AllowVFS(c, permission.POST, srcDoc); err != nil {
+		return err
+	}
+
+	dstDoc, err := inst.VFS().FileByID(c.QueryParam("To"))
+	if err != nil {
+		return wrapError(err)
+	}
+	if err := middlewares.AllowVFS(c, permission.POST, dstDoc); err != nil {
+		return err
+	}
+
+	imageID := c.Param("id") + "/" + c.Param("image-id")
+	image, err := note.CopyImageToAnotherNote(inst, imageID, dstDoc)
+	if err != nil {
+		inst.Logger().WithNamespace("notes").Infof("Image copy has failed: %s", err)
+		return wrapError(err)
+	}
+
+	apiImage := files.NewNoteImage(inst, image)
+	return jsonapi.Data(c, http.StatusCreated, apiImage, nil)
+}
+
 // GetImage returns the image for a note, possibly resized.
 func GetImage(c echo.Context) error {
 	inst := middlewares.GetInstance(c)
@@ -430,6 +504,8 @@ func Routes(router *echo.Group) {
 	router.GET("", ListNotes)
 	router.GET("/:id", GetNote)
 	router.GET("/:id/steps", GetSteps)
+	router.GET("/:id/text", GetNoteText)
+	router.GET("/texts", GetTexts)
 	router.PATCH("/:id", PatchNote)
 	router.PUT("/:id/title", ChangeTitle)
 	router.PUT("/:id/telepointer", PutTelepointer)
@@ -437,6 +513,7 @@ func Routes(router *echo.Group) {
 	router.GET("/:id/open", OpenNoteURL)
 	router.PUT("/:id/schema", UpdateNoteSchema)
 	router.POST("/:id/images", UploadImage)
+	router.POST("/:id/:image-id/copy", CopyImage)
 	router.GET("/:id/images/:image-id/:secret", GetImage)
 }
 
@@ -452,7 +529,7 @@ func wrapError(err error) *jsonapi.Error {
 		return jsonapi.Conflict(err)
 	case os.ErrNotExist, vfs.ErrParentDoesNotExist, vfs.ErrParentInTrash:
 		return jsonapi.NotFound(err)
-	case vfs.ErrFileTooBig:
+	case vfs.ErrFileTooBig, vfs.ErrMaxFileSize:
 		return jsonapi.Errorf(http.StatusRequestEntityTooLarge, "%s", err)
 	case sharing.ErrMemberNotFound:
 		return jsonapi.NotFound(err)
@@ -462,7 +539,7 @@ func wrapError(err error) *jsonapi.Error {
 
 func getCreatedBy(c echo.Context) string {
 	if claims, ok := c.Get("claims").(permission.Claims); ok {
-		switch claims.Audience {
+		switch claims.AudienceString() {
 		case consts.AppAudience, consts.KonnectorAudience:
 			return claims.Subject
 		}

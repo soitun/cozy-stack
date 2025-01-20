@@ -19,14 +19,15 @@ const (
 	RegisterTokenLen      = 16
 	PasswordResetTokenLen = 16
 	SessionCodeLen        = 32
+	EmailVerifiedCodeLen  = 32
 	SessionSecretLen      = 64
 	MagicLinkCodeLen      = 32
 	OauthSecretLen        = 128
 )
 
 var twoFactorTOTPOptions = totp.ValidateOpts{
-	Period:    30, // 30s
-	Skew:      10, // 30s +- 10*30s = [-5min; 5,5min]
+	Period:    60, // 60s
+	Skew:      14, // 60s +- 14*60s = [-13min; 15min]
 	Digits:    otp.DigitsSix,
 	Algorithm: otp.AlgorithmSHA256,
 }
@@ -203,4 +204,23 @@ func (i *Instance) CreateSessionCode() (string, error) {
 // function.
 func (i *Instance) CheckAndClearSessionCode(code string) bool {
 	return GetStore().CheckAndClearSessionCode(i, code)
+}
+
+// CreateEmailVerifiedCode returns an email_verified_code that can be used to
+// avoid the 2FA by email.
+func (i *Instance) CreateEmailVerifiedCode() (string, error) {
+	code := crypto.GenerateRandomString(EmailVerifiedCodeLen)
+	store := GetStore()
+	if err := store.SaveEmailVerfiedCode(i, code); err != nil {
+		return "", err
+	}
+	return code, nil
+}
+
+// CheckEmailVerifiedCode will return true if the email verified code is valid.
+func (i *Instance) CheckEmailVerifiedCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	return GetStore().CheckEmailVerifiedCode(i, code)
 }

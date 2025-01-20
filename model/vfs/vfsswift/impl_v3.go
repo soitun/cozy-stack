@@ -1,3 +1,6 @@
+// Package vfsswift is the implementation of the Virtual File System by using
+// Swift from the OpenStack project. The file contents are saved in the object
+// storage (Swift), and the metadata are indexed in CouchDB.
 package vfsswift
 
 import (
@@ -16,6 +19,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/lock"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/utils"
+	"github.com/gofrs/uuid/v5"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/ncw/swift/v2"
 )
@@ -35,6 +39,7 @@ type swiftVFSV3 struct {
 }
 
 const swiftV3ContainerPrefix = "cozy-v3-"
+const maxFileSize = 5 << (3 * 10) // 5 GiB
 
 // NewV3 returns a vfs.VFS instance associated with the specified indexer and
 // the swift storage url.
@@ -221,9 +226,11 @@ func (sfs *swiftVFSV3) CreateFile(newdoc, olddoc *vfs.FileDoc, opts ...vfs.Creat
 	}
 
 	if newdoc.DocID == "" {
-		if newdoc.DocID, err = couchdb.UUID(sfs); err != nil {
+		uid, err := uuid.NewV7()
+		if err != nil {
 			return nil, err
 		}
+		newdoc.DocID = uid.String()
 	}
 
 	newdoc.InternalID = NewInternalID()
@@ -260,9 +267,11 @@ func (sfs *swiftVFSV3) CopyFile(olddoc, newdoc *vfs.FileDoc) error {
 		return err
 	}
 
-	if newdoc.DocID, err = couchdb.UUID(sfs); err != nil {
+	uid, err := uuid.NewV7()
+	if err != nil {
 		return err
 	}
+	newdoc.DocID = uid.String()
 	newdoc.InternalID = NewInternalID()
 
 	// Copy the file
@@ -304,11 +313,11 @@ func (sfs *swiftVFSV3) DissociateFile(src, dst *vfs.FileDoc) error {
 		}
 	}
 
-	uuid, err := couchdb.UUID(sfs)
+	uid, err := uuid.NewV7()
 	if err != nil {
 		return err
 	}
-	dst.DocID = uuid
+	dst.DocID = uid.String()
 
 	// Copy the file
 	srcName := MakeObjectNameV3(src.DocID, src.InternalID)
@@ -327,7 +336,7 @@ func (sfs *swiftVFSV3) DissociateFile(src, dst *vfs.FileDoc) error {
 	}
 
 	// Remove the source
-	thumbsFS := &thumbsV2{
+	thumbsFS := &thumbsV3{
 		c:         sfs.c,
 		container: sfs.container,
 		ctx:       context.Background(),
@@ -585,6 +594,101 @@ func (sfs *swiftVFSV3) RevertFileVersion(doc *vfs.FileDoc, version *vfs.Version)
 	return sfs.Indexer.DeleteVersion(version)
 }
 
+func (sfs *swiftVFSV3) CopyFileFromOtherFS(
+	newdoc, olddoc *vfs.FileDoc,
+	srcFS vfs.Fs,
+	srcDoc *vfs.FileDoc,
+) error {
+	if lockerr := sfs.mu.Lock(); lockerr != nil {
+		return lockerr
+	}
+	defer sfs.mu.Unlock()
+
+	newsize, maxsize, capsize, err := vfs.CheckAvailableDiskSpace(sfs, newdoc)
+	if err != nil {
+		return err
+	}
+	if newsize > maxsize {
+		return vfs.ErrFileTooBig
+	}
+
+	newpath, err := sfs.Indexer.FilePath(newdoc)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(newpath, vfs.TrashDirName+"/") {
+		return vfs.ErrParentInTrash
+	}
+
+	if olddoc == nil {
+		var exists bool
+		exists, err = sfs.Indexer.DirChildExists(newdoc.DirID, newdoc.DocName)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return os.ErrExist
+		}
+	}
+
+	if newdoc.DocID == "" {
+		uid, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		newdoc.DocID = uid.String()
+	}
+
+	newdoc.InternalID = NewInternalID()
+
+	srcName := MakeObjectNameV3(srcDoc.DocID, srcDoc.InternalID)
+	dstName := MakeObjectNameV3(newdoc.DocID, newdoc.InternalID)
+	srcContainer := srcFS.(*swiftVFSV3).container
+	if _, err := sfs.c.ObjectCopy(sfs.ctx, srcContainer, srcName, sfs.container, dstName, nil); err != nil {
+		return err
+	}
+
+	var v *vfs.Version
+	if olddoc != nil {
+		v = vfs.NewVersion(olddoc)
+		err = sfs.Indexer.UpdateFileDoc(olddoc, newdoc)
+	} else {
+		err = sfs.Indexer.CreateNamedFileDoc(newdoc)
+	}
+	if err != nil {
+		return err
+	}
+
+	if v != nil {
+		actionV, toClean, _ := vfs.FindVersionsToClean(sfs, newdoc.DocID, v)
+		if bytes.Equal(newdoc.MD5Sum, olddoc.MD5Sum) {
+			actionV = vfs.CleanCandidateVersion
+		}
+		if actionV == vfs.KeepCandidateVersion {
+			if errv := sfs.Indexer.CreateVersion(v); errv != nil {
+				actionV = vfs.CleanCandidateVersion
+			}
+		}
+		if actionV == vfs.CleanCandidateVersion {
+			internalID := v.DocID
+			if parts := strings.SplitN(v.DocID, "/", 2); len(parts) > 1 {
+				internalID = parts[1]
+			}
+			objName := MakeObjectNameV3(newdoc.DocID, internalID)
+			_ = sfs.c.ObjectDelete(sfs.ctx, sfs.container, objName)
+		}
+		for _, old := range toClean {
+			_ = cleanOldVersion(sfs, newdoc.DocID, old)
+		}
+	}
+
+	if capsize > 0 && newsize >= capsize {
+		vfs.PushDiskQuotaAlert(sfs, true)
+	}
+
+	return nil
+}
+
 // UpdateFileDoc calls the indexer UpdateFileDoc function and adds a few checks
 // before actually calling this method:
 //   - locks the filesystem for writing
@@ -611,6 +715,7 @@ func (sfs *swiftVFSV3) UpdateFileDoc(olddoc, newdoc *vfs.FileDoc) error {
 // UdpdateDirDoc calls the indexer UdpdateDirDoc function and adds a few checks
 // before actually calling this method:
 //   - locks the filesystem for writing
+//   - checks that we don't move a directory to one of its descendant
 //   - checks in case we have a move operation that the new path is available
 //
 // @override Indexer.UpdateDirDoc
@@ -620,6 +725,9 @@ func (sfs *swiftVFSV3) UpdateDirDoc(olddoc, newdoc *vfs.DirDoc) error {
 	}
 	defer sfs.mu.Unlock()
 	if newdoc.DirID != olddoc.DirID || newdoc.DocName != olddoc.DocName {
+		if strings.HasPrefix(newdoc.Fullpath, olddoc.Fullpath+"/") {
+			return vfs.ErrForbiddenDocMove
+		}
 		exists, err := sfs.Indexer.DirChildExists(newdoc.DirID, newdoc.DocName)
 		if err != nil {
 			return err
@@ -748,12 +856,11 @@ func (f *swiftFileCreationV3) Write(p []byte) (int, error) {
 func (f *swiftFileCreationV3) Close() (err error) {
 	defer func() {
 		if err != nil {
-			// remove the temporary file if an error occurred
+			// Remove the temporary file from Swift if an error occurred
 			_ = f.fs.c.ObjectDelete(f.fs.ctx, f.fs.container, f.name)
-			// If an error has occurred that is not due to the index update, we should
-			// delete the file from the index.
-			_, isCouchErr := couchdb.IsCouchError(err)
-			if !isCouchErr && f.olddoc == nil {
+			// If an error has occurred when creating a new file, we should
+			// also delete the file from the index.
+			if f.olddoc == nil {
 				_ = f.fs.Indexer.DeleteFileDoc(f.newdoc)
 			}
 		}
@@ -872,10 +979,14 @@ func (f *swiftFileCreationV3) Close() (err error) {
 				internalID = parts[1]
 			}
 			objName := MakeObjectNameV3(newdoc.DocID, internalID)
-			_ = f.fs.c.ObjectDelete(f.fs.ctx, f.fs.container, objName)
+			if err := f.fs.c.ObjectDelete(f.fs.ctx, f.fs.container, objName); err != nil {
+				f.fs.log.Warnf("Could not delete previous version %q: %s", objName, err.Error())
+			}
 		}
 		for _, old := range toClean {
-			_ = cleanOldVersion(f.fs, newdoc.DocID, old)
+			if err := cleanOldVersion(f.fs, newdoc.DocID, old); err != nil {
+				f.fs.log.Warnf("Could not delete old versions for %s: %s", newdoc.DocID, err.Error())
+			}
 		}
 	}
 

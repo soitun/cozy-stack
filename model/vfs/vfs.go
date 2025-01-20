@@ -126,6 +126,11 @@ type Fs interface {
 	// version.
 	ImportFileVersion(version *Version, content io.ReadCloser) error
 
+	// CopyFileFromOtherFS creates or updates a file by copying the content of
+	// a file in another Cozy. It is used for sharings, to optimize I/O when
+	// two instances are on the same stack.
+	CopyFileFromOtherFS(olddoc, newdoc *FileDoc, srcFS Fs, srcDoc *FileDoc) error
+
 	// Fsck return the list of inconsistencies in the VFS
 	Fsck(func(log *FsckLog), bool) (err error)
 	CheckFilesConsistency(func(*FsckLog), bool) error
@@ -257,6 +262,12 @@ type DiskThresholder interface {
 	DiskQuota() int64
 }
 
+// Avatarer defines an interface to define an avatar filesystem.
+type Avatarer interface {
+	CreateAvatar(contentType string) (io.WriteCloser, error)
+	ServeAvatarContent(w http.ResponseWriter, req *http.Request) error
+}
+
 // Thumbser defines an interface to define a thumbnail filesystem.
 type Thumbser interface {
 	ThumbExists(img *FileDoc, format string) (ok bool, err error)
@@ -332,6 +343,14 @@ type DocPatch struct {
 	Executable  *bool      `json:"executable,omitempty"`
 	Encrypted   *bool      `json:"encrypted,omitempty"`
 	Class       *string    `json:"class,omitempty"`
+
+	CozyMetadata CozyMetadataPatch `json:"cozyMetadata"`
+}
+
+// CozyMetadataPatch is a struct containing the modifiable fields for a
+// CozyMetadata.
+type CozyMetadataPatch struct {
+	Favorite *bool `json:"favorite,omitempty"`
 }
 
 // DirOrFileDoc is a union struct of FileDoc and DirDoc. It is useful to
@@ -340,15 +359,14 @@ type DirOrFileDoc struct {
 	*DirDoc
 
 	// fields from FileDoc not contained in DirDoc
-	ByteSize   int64    `json:"size,string"`
-	MD5Sum     []byte   `json:"md5sum,omitempty"`
-	Mime       string   `json:"mime,omitempty"`
-	Class      string   `json:"class,omitempty"`
-	Executable bool     `json:"executable,omitempty"`
-	Trashed    bool     `json:"trashed,omitempty"`
-	Encrypted  bool     `json:"encrypted,omitempty"`
-	Metadata   Metadata `json:"metadata,omitempty"`
-	InternalID string   `json:"internal_vfs_id,omitempty"`
+	ByteSize   int64  `json:"size,string"`
+	MD5Sum     []byte `json:"md5sum,omitempty"`
+	Mime       string `json:"mime,omitempty"`
+	Class      string `json:"class,omitempty"`
+	Executable bool   `json:"executable,omitempty"`
+	Trashed    bool   `json:"trashed,omitempty"`
+	Encrypted  bool   `json:"encrypted,omitempty"`
+	InternalID string `json:"internal_vfs_id,omitempty"`
 }
 
 // Clone is part of the couchdb.Doc interface
@@ -836,6 +854,10 @@ func normalizeDocPatch(data, patch *DocPatch, cdate time.Time) (*DocPatch, error
 		patch.Encrypted = data.Encrypted
 	}
 
+	if patch.CozyMetadata.Favorite == nil {
+		patch.CozyMetadata.Favorite = data.CozyMetadata.Favorite
+	}
+
 	return patch, nil
 }
 
@@ -909,7 +931,7 @@ func CheckAvailableDiskSpace(fs VFS, doc *FileDoc) (newsize, maxsize, capsize in
 
 	maxsize = fs.MaxFileSize()
 	if maxsize > 0 && newsize > maxsize {
-		return 0, 0, 0, ErrFileTooBig
+		return 0, 0, 0, ErrMaxFileSize
 	}
 
 	diskQuota := fs.DiskQuota()
@@ -930,7 +952,7 @@ func CheckAvailableDiskSpace(fs VFS, doc *FileDoc) (newsize, maxsize, capsize in
 	return newsize, maxsize, capsize, nil
 }
 
-// conflictName generates a new name for a file/folder in conflict with another
+// ConflictName generates a new name for a file/folder in conflict with another
 // that has the same path. A conflicted file `foo` will be renamed foo (2),
 // then foo (3), etc.
 func ConflictName(fs VFS, dirID, name string, isFile bool) string {

@@ -11,6 +11,7 @@
   - "Using the HTTP API": ./http-api.md
   - "Develop a client-side app": ./client-app-dev.md
   - "Running and building Docker images": ./docker.md
+  - "Running a konnector locally": ./konnectors-dev.md
   - "Adding a new doctype": ./doctype.md
   - "Working with the stack assets": ./assets.md
   - "Build a release": ./release.md
@@ -22,6 +23,7 @@
   - "Sharing design": ./sharing-design.md
   - "Workflow of the konnectors": ./konnectors-workflow.md
 - List of services:
+  - "/ai - AI": ./ai.md
   - "/auth - Authentication & OAuth": ./auth.md
   - " /oidc - Delegated authentication": ./delegated-auth.md
   - "/apps - Applications Management": ./apps.md
@@ -48,6 +50,7 @@
   - "/permissions - Permissions": ./permissions.md
   - "/realtime - Realtime": ./realtime.md
   - "/remote - Proxy for remote data/API": ./remote.md
+  - " /remote/nextcloud - NextCloud": ./nextcloud.md
   - "/settings - Settings": ./settings.md
   - " /settings - Terms of Services": ./user-action-required.md
   - "/sharings - Sharing": ./sharing.md

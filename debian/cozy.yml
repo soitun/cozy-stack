@@ -1,0 +1,47 @@
+fs:
+  url: file:///var/lib/cozy
+
+vault:
+  credentials_encryptor_key: /etc/cozy/vault.enc
+  credentials_decryptor_key: /etc/cozy/vault.dec
+
+konnectors:
+  cmd: /usr/share/cozy/konnector-run.sh
+
+log:
+  level: info
+  syslog: true
+
+registries:
+  default:
+    - https://apps-registry.cozycloud.cc/selfhosted
+    - https://apps-registry.cozycloud.cc/mespapiers
+    - https://apps-registry.cozycloud.cc/banks
+    - https://apps-registry.cozycloud.cc/
+
+# mail service parameters for sending email via SMTP
+mail:
+  # mail smtp host
+  host: localhost
+
+  # mail smtp port
+  port: 25
+
+  # mail smtp username
+  #username: myusername
+  # mail smtp password
+  #password: mypassword
+
+  # disable encryption (no STARTTLS and no native TLS)
+  # Means using plain unencrypted SMTP
+  disable_tls: true
+
+  # Use native SSL connection (SMTPS) instead of STARTTLS
+  use_ssl: false
+
+  # skip the certificate validation (may be useful on localhost)
+  skip_certificate_validation: false
+
+  # Local Name
+  # The hostname sent to the SMTP server with the HELO command
+  local_name: localhost

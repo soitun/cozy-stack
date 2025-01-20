@@ -1,4 +1,4 @@
-(function (w, d) {
+;(function (w, d) {
   if (!w.fetch || !w.Headers) return
 
   const loginForm = d.getElementById('login-form')
@@ -11,6 +11,7 @@
   const loginField = d.getElementById('login-field')
   const longRunCheckbox = d.getElementById('long-run-session')
   const trustedTokenInput = d.getElementById('trusted-device-token')
+  const emailVerifiedCodeInput = d.getElementById('email_verified_code')
   const magicCodeInput = d.getElementById('magic_code')
 
   // Set the trusted device token from the localstorage in the form if it exists
@@ -19,7 +20,7 @@
     const deviceToken = storage.getItem('trusted-device-token') || ''
     trustedTokenInput.value = deviceToken
   } catch (e) {
-    // do nothing
+    console.log(e) // do nothing
   }
 
   const onSubmitPassphrase = function (event) {
@@ -47,6 +48,10 @@
         data.append('long-run-session', longRun)
         data.append('redirect', redirect)
         data.append('csrf_token', csrfTokenInput.value)
+
+        if (emailVerifiedCodeInput) {
+          data.append('email_verified_code', emailVerifiedCodeInput.value)
+        }
 
         // For the /auth/authorize/move && /auth/confirm pages
         if (stateInput) {

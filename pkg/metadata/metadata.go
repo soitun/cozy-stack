@@ -1,3 +1,5 @@
+// Package metadata is used for manipulating the cozyMetadata field of the
+// documents.
 package metadata
 
 import (
@@ -27,6 +29,8 @@ type CozyMetadata struct {
 	DocTypeVersion string `json:"doctypeVersion"`
 	// Version of the cozyMetadata
 	MetadataVersion int `json:"metadataVersion"`
+	// Tell if the document if part of the favorites
+	Favorite bool `json:"favorite,omitempty"`
 	// Creation date of the cozy document
 	CreatedAt time.Time `json:"createdAt"`
 	// Slug of the app or konnector which created the document
@@ -37,6 +41,10 @@ type CozyMetadata struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 	// List of objects representing the applications which modified the cozy document
 	UpdatedByApps []*UpdatedByAppEntry `json:"updatedByApps,omitempty"`
+	// Identifier of the account in io.cozy.accounts (for konnectors)
+	SourceAccount string `json:"sourceAccount,omitempty"`
+	// Identifier unique to the account targeted by the connector (login most of the time)
+	SourceIdentifier string `json:"sourceAccountIdentifier,omitempty"`
 }
 
 // New initializes a new CozyMetadata structure

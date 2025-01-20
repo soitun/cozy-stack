@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/cozy/cozy-stack/model/instance"
-	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/couchdb/mango"
+	"github.com/cozy/cozy-stack/pkg/emailer"
 	"github.com/cozy/cozy-stack/pkg/i18n"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/labstack/echo/v4"
@@ -221,12 +221,11 @@ func sendLoginNotification(i *instance.Instance, l *LoginEntry) error {
 		"Country":              l.Country,
 		"IP":                   l.IP,
 		"Browser":              l.Browser,
-		"OS":                   l.OS,
 		"ChangePassphraseLink": changePassphraseLink,
 		"ActivateTwoFALink":    activateTwoFALink,
 	}
 
-	return lifecycle.SendMail(i, &lifecycle.Mail{
+	return emailer.SendEmail(i, &emailer.TransactionalEmailCmd{
 		TemplateName:   "new_connection",
 		TemplateValues: templateValues,
 	})
@@ -244,7 +243,7 @@ func SendNewRegistrationNotification(i *instance.Instance, clientRegistrationID 
 		"RevokeLink":  revokeLink.String(),
 	}
 
-	return lifecycle.SendMail(i, &lifecycle.Mail{
+	return emailer.SendEmail(i, &emailer.TransactionalEmailCmd{
 		TemplateName:   "new_registration",
 		TemplateValues: templateValues,
 	})

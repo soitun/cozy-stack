@@ -1,0 +1,37 @@
+package emailer
+
+import (
+	"testing"
+
+	"github.com/cozy/cozy-stack/model/instance"
+	"github.com/stretchr/testify/mock"
+)
+
+// Mock implementation of [Emailer].
+type Mock struct {
+	mock.Mock
+}
+
+// NewMock instantiates a new [Mock].
+func NewMock(t *testing.T) *Mock {
+	m := new(Mock)
+	m.Test(t)
+	t.Cleanup(func() { m.AssertExpectations(t) })
+
+	return m
+}
+
+// SendEmail mock method.
+func (m *Mock) SendEmail(inst *instance.Instance, cmd *TransactionalEmailCmd) error {
+	return m.Called(inst, cmd).Error(0)
+}
+
+// SendPendingEmail mock method.
+func (m *Mock) SendPendingEmail(inst *instance.Instance, cmd *TransactionalEmailCmd) error {
+	return m.Called(inst, cmd).Error(0)
+}
+
+// SendCampaignEmail mock method
+func (m *Mock) SendCampaignEmail(inst *instance.Instance, cmd *CampaignEmailCmd) error {
+	return m.Called(inst, cmd).Error(0)
+}

@@ -1,10 +1,11 @@
-package settings
+package settings_test
 
 import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -13,13 +14,17 @@ import (
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/oauth"
 	"github.com/cozy/cozy-stack/model/session"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/tests/testutils"
-	"github.com/cozy/cozy-stack/web/auth"
+	"github.com/cozy/cozy-stack/web"
 	"github.com/cozy/cozy-stack/web/errors"
+	"github.com/cozy/cozy-stack/web/middlewares"
+	websettings "github.com/cozy/cozy-stack/web/settings"
+	"github.com/cozy/cozy-stack/web/statik"
 	"github.com/gavv/httpexpect/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -27,6 +32,35 @@ import (
 
 	_ "github.com/cozy/cozy-stack/worker/mails"
 )
+
+func setupRouter(t *testing.T, inst *instance.Instance, svc csettings.Service) *httptest.Server {
+	t.Helper()
+
+	handler := echo.New()
+	handler.HTTPErrorHandler = errors.ErrorHandler
+	group := handler.Group("/settings", func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(context echo.Context) error {
+			context.Set("instance", inst)
+
+			cookie, err := context.Request().Cookie(session.CookieName(inst))
+			if err != http.ErrNoCookie {
+				require.NoError(t, err, "Could not get session cookie")
+				if cookie.Value == "connected" {
+					sess, _ := session.New(inst, session.LongRun)
+					context.Set("session", sess)
+				}
+			}
+
+			return next(context)
+		}
+	})
+
+	websettings.NewHTTPHandler(svc).Register(group)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return ts
+}
 
 func TestSettings(t *testing.T) {
 	if testing.Short() {
@@ -36,9 +70,28 @@ func TestSettings(t *testing.T) {
 	var instanceRev string
 	var oauthClientID string
 
-	config.UseTestFile()
+	config.UseTestFile(t)
+	conf := config.GetConfig()
+	conf.Assets = "../../assets"
+	conf.Contexts[config.DefaultInstanceContext] = map[string]interface{}{
+		"logos": map[string]interface{}{
+			"home": map[string]interface{}{
+				"light": []interface{}{
+					map[string]interface{}{"src": "/logos/main_cozy.png", "alt": "Cozy Cloud"},
+				},
+			},
+		},
+	}
+	was := conf.Subdomains
+	conf.Subdomains = config.NestedSubdomains
+	defer func() { conf.Subdomains = was }()
+
+	_ = web.LoadSupportedLocales()
 	testutils.NeedCouchdb(t)
 	setup := testutils.NewSetup(t, t.Name())
+	render, _ := statik.NewDirRenderer("../../assets")
+	middlewares.BuildTemplates()
+
 	testInstance := setup.GetTestInstance(&lifecycle.Options{
 		Locale:      "en",
 		Timezone:    "Europe/Berlin",
@@ -47,52 +100,51 @@ func TestSettings(t *testing.T) {
 	})
 	scope := consts.Settings + " " + consts.OAuthClients
 	_, token := setup.GetTestClient(scope)
+	sessCookie := session.CookieName(testInstance)
 
-	ts := setup.GetTestServer("/settings", Routes)
+	svc := csettings.NewServiceMock(t)
+	ts := setupRouter(t, testInstance, svc)
+	ts.Config.Handler.(*echo.Echo).Renderer = render
 	ts.Config.Handler.(*echo.Echo).HTTPErrorHandler = errors.ErrorHandler
-	t.Cleanup(ts.Close)
-
-	tsB := setup.GetTestServerMultipleRoutes(map[string]func(*echo.Group){
-		"/auth": func(g *echo.Group) {
-			g.Use(fakeAuthentication)
-			auth.Routes(g)
-		},
-		"/settings": func(g *echo.Group) {
-			g.Use(fakeAuthentication)
-			Routes(g)
-		},
-	})
-	tsB.Config.Handler.(*echo.Echo).HTTPErrorHandler = errors.ErrorHandler
-	t.Cleanup(tsB.Close)
-
-	setupFlagship := testutils.NewSetup(t, t.Name())
-	testInstanceFlagship := setupFlagship.GetTestInstance(&lifecycle.Options{
-		Locale:      "en",
-		Timezone:    "Europe/Berlin",
-		Email:       "alice2@example.com",
-		ContextName: "test-context",
-	})
-	tsC := setupFlagship.GetTestServer("/settings", Routes)
-	t.Cleanup(tsC.Close)
-	tsC.Config.Handler.(*echo.Echo).HTTPErrorHandler = errors.ErrorHandler
+	tsURL := ts.URL
 
 	t.Run("GetContext", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
-		e.GET("/settings/context").
+		testutils.WithManager(t, testInstance, testutils.ManagerConfig{URL: "http://manager.example.org"})
+
+		obj := e.GET("/settings/context").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
-			Expect().Status(200)
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		data := obj.Value("data").Object()
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.context")
+
+		attrs := data.Value("attributes").Object()
+		attrs.HasValue("manager_url", "http://manager.example.org")
+		attrs.HasValue("logos", map[string]interface{}{
+			"home": map[string]interface{}{
+				"light": []interface{}{
+					map[string]interface{}{"src": "/logos/main_cozy.png", "alt": "Cozy Cloud"},
+				},
+			},
+		})
 	})
 
 	t.Run("PatchWithGoodRev", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		doc1, err := testInstance.SettingsDocument()
 		require.NoError(t, err)
 
 		// We are going to patch an instance with newer values, and give the good rev
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/vnd.api+json").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
@@ -114,13 +166,14 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchWithBadRev", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		// We are going to patch an instance with newer values, but with a totally
 		// random rev
 		rev := "6-2d9b7ef014d10549c2b4e206672d3e44"
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/vnd.api+json").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
@@ -142,12 +195,13 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchWithBadRevNoChanges", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		// We are defining a random rev, but make no changes in the instance values
 		rev := "6-2d9b7ef014d10549c2b4e206672d3e44"
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/vnd.api+json").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
@@ -169,12 +223,13 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchWithBadRevAndChanges", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		// We are defining a random rev, but make changes in the instance values
 		rev := "6-2d9b7ef014d10549c2b4e206672d3e44"
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/vnd.api+json").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
@@ -196,159 +251,128 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("DiskUsage", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		obj := e.GET("/settings/disk-usage").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		e.GET("/settings/disk-usage").
+			WithCookie(sessCookie, "connected").
 			Expect().Status(401)
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.disk-usage")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.disk-usage")
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("used", "0")
-		attrs.ValueEqual("files", "0")
-		attrs.ValueEqual("versions", "0")
+		attrs.HasValue("used", "0")
+		attrs.HasValue("files", "0")
+		attrs.HasValue("versions", "0")
 	})
 
 	t.Run("RegisterPassphraseWrongToken", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.POST("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "passphrase":     "MyFirstPassphrase",
-        "iterations":     5000,
+        "iterations":     50000,
         "register_token": "BADBEEF",
       }`)).
 			Expect().Status(400)
 
 		e.POST("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "passphrase":     "MyFirstPassphrase",
-        "iterations":     5000,
+        "iterations":     50000,
         "register_token": "XYZ",
       }`)).
 			Expect().Status(400)
 	})
 
 	t.Run("RegisterPassphraseCorrectToken", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		res := e.POST("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithJSON(map[string]interface{}{
 				"passphrase":     "MyFirstPassphrase",
-				"iterations":     5000,
+				"iterations":     50000,
 				"register_token": hex.EncodeToString(testInstance.RegisterToken),
 				"key":            "xxx",
 			}).
 			Expect().Status(200)
 
-		res.Cookies().Length().Equal(1)
+		res.Cookies().Length().IsEqual(1)
 		res.Cookie("cozysessid").Value().NotEmpty()
 	})
 
-	t.Run("RegisterPassphraseForFlagshipApp", func(t *testing.T) {
-		oauthClient := &oauth.Client{
-			RedirectURIs:    []string{"http:/localhost:4000/oauth/callback"},
-			ClientName:      "Cozy-desktop on my-new-laptop",
-			ClientKind:      "desktop",
-			ClientURI:       "https://docs.cozy.io/en/mobile/desktop.html",
-			LogoURI:         "https://docs.cozy.io/assets/images/cozy-logo-docs.svg",
-			PolicyURI:       "https://cozy.io/policy",
-			SoftwareID:      "/github.com/cozy-labs/cozy-desktop",
-			SoftwareVersion: "0.16.0",
-		}
-		require.Nil(t, oauthClient.Create(testInstanceFlagship))
-		client, err := oauth.FindClient(testInstanceFlagship, oauthClient.ClientID)
-		require.NoError(t, err)
-		require.NoError(t, client.SetFlagship(testInstanceFlagship))
-
-		e := httpexpect.Default(t, tsC.URL)
-		obj := e.POST("/settings/passphrase/flagship").
-			WithJSON(map[string]interface{}{
-				"passphrase":     "MyFirstPassphrase",
-				"iterations":     5000,
-				"register_token": hex.EncodeToString(testInstanceFlagship.RegisterToken),
-				"key":            "xxx-key-xxx",
-				"public_key":     "xxx-public-key-xxx",
-				"private_key":    "xxx-private-key-xxx",
-				"client_id":      client.CouchID,
-				"client_secret":  client.ClientSecret,
-			}).
-			Expect().Status(200).
-			JSON().Object()
-
-		obj.Value("access_token").String().NotEmpty()
-		obj.Value("refresh_token").String().NotEmpty()
-		obj.ValueEqual("scope", "*")
-		obj.ValueEqual("token_type", "bearer")
-	})
-
 	t.Run("UpdatePassphraseWithWrongPassphrase", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "new_passphrase":     "MyPassphrase",
         "current_passphrase": "BADBEEF",
-        "iterations":         5000
+        "iterations":         50000
       }`)).
 			Expect().Status(400)
 	})
 
 	t.Run("UpdatePassphraseSuccess", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		res := e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "new_passphrase":     "MyUpdatedPassphrase",
         "current_passphrase": "MyFirstPassphrase",
-        "iterations":         5000
+        "iterations":         50000
       }`)).
 			Expect().Status(204)
 
-		res.Cookies().Length().Equal(1)
+		res.Cookies().Length().IsEqual(1)
 		res.Cookie("cozysessid").Value().NotEmpty()
 	})
 
 	t.Run("UpdatePassphraseWithForce", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "new_passphrase": "MyPassphrase",
-        "iterations":     5000,
+        "iterations":     50000,
         "force":          true
       }`)).
 			Expect().Status(400)
 
-		cfg := config.GetConfig().Authentication
-		cfg["test-context"] = map[string]interface{}{
-			"disable_password_authentication": true,
-		}
-		defer delete(cfg, "test-context")
+		passwordDefined := false
+		testInstance.PasswordDefined = &passwordDefined
 
 		e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithQuery("Force", true).
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
         "new_passphrase": "MyPassphrase",
-        "iterations":     5000,
+        "iterations":     50000,
         "force":          true
       }`)).
 			Expect().Status(204)
@@ -356,9 +380,10 @@ func TestSettings(t *testing.T) {
 
 	t.Run("CheckPassphrase", func(t *testing.T) {
 		t.Run("invalid", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
+			e := testutils.CreateTestClient(t, tsURL)
 
 			e.POST("/settings/passphrase/check").
+				WithCookie(sessCookie, "connected").
 				WithHeader("Authorization", "Bearer "+token).
 				WithHeader("Content-Type", "application/json").
 				WithBytes([]byte(`{
@@ -368,9 +393,10 @@ func TestSettings(t *testing.T) {
 		})
 
 		t.Run("valid", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
+			e := testutils.CreateTestClient(t, tsURL)
 
 			e.POST("/settings/passphrase/check").
+				WithCookie(sessCookie, "connected").
 				WithHeader("Authorization", "Bearer "+token).
 				WithHeader("Content-Type", "application/json").
 				WithBytes([]byte(`{
@@ -382,15 +408,16 @@ func TestSettings(t *testing.T) {
 
 	t.Run("GetHint", func(t *testing.T) {
 		t.Run("WithNoHint", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
+			e := testutils.CreateTestClient(t, tsURL)
 
 			e.GET("/settings/hint").
+				WithCookie(sessCookie, "connected").
 				WithHeader("Authorization", "Bearer "+token).
 				Expect().Status(404)
 		})
 
 		t.Run("WithHint", func(t *testing.T) {
-			e := testutils.CreateTestClient(t, ts.URL)
+			e := testutils.CreateTestClient(t, tsURL)
 
 			setting, err := settings.Get(testInstance)
 			assert.NoError(t, err)
@@ -399,15 +426,17 @@ func TestSettings(t *testing.T) {
 			assert.NoError(t, err)
 
 			e.GET("/settings/hint").
+				WithCookie(sessCookie, "connected").
 				WithHeader("Authorization", "Bearer "+token).
 				Expect().Status(204)
 		})
 	})
 
 	t.Run("UpdateHint", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.PUT("/settings/hint").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
@@ -421,84 +450,95 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("GetPassphraseParameters", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		obj := e.GET("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.passphrase")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.passphrase")
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("salt", "me@"+testInstance.Domain)
-		attrs.ValueEqual("kdf", 0.0)
-		attrs.ValueEqual("iterations", 5000.0)
+		attrs.HasValue("salt", "me@"+testInstance.Domain)
+		attrs.HasValue("kdf", 0.0)
+		attrs.HasValue("iterations", 50000)
 	})
 
 	t.Run("GetCapabilities", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
+		svc.On("GetLegalNoticeUrl", testInstance).Return("", nil).Once()
 
 		e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			Expect().Status(401)
 
 		obj := e.GET("/settings/capabilities").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.capabilities")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.capabilities")
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("file_versioning", true)
-		attrs.ValueEqual("can_auth_with_password", true)
-		attrs.ValueEqual("can_auth_with_magic_links", false)
-		attrs.ValueEqual("can_auth_with_oidc", false)
+		attrs.HasValue("file_versioning", true)
+		attrs.HasValue("can_auth_with_password", true)
+		attrs.HasValue("can_auth_with_magic_links", false)
+		attrs.HasValue("can_auth_with_oidc", false)
 	})
 
 	t.Run("GetInstance", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			Expect().Status(401)
 
 		testInstance.RegisterToken = []byte("test")
 
 		e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithQuery("registerToken", "74657374").
 			Expect().Status(200)
 
 		testInstance.RegisterToken = []byte{}
+		svc.On("GetLegalNoticeUrl", testInstance).Return("https://testmanager.cozycloud.cc/tos/12345.pdf", nil).Once()
 
 		obj := e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.instance")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.instance")
 
 		meta := data.Value("meta").Object()
 		instanceRev = meta.Value("rev").String().NotEmpty().Raw()
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("email", "alice@example.org")
-		attrs.ValueEqual("tz", "Europe/London")
-		attrs.ValueEqual("locale", "en")
+		attrs.HasValue("email", "alice@example.org")
+		attrs.HasValue("tz", "Europe/London")
+		attrs.HasValue("locale", "en")
+		attrs.HasValue("password_defined", true)
+		attrs.HasValue("legal_notice_url", "https://testmanager.cozycloud.cc/tos/12345.pdf")
 	})
 
 	t.Run("UpdateInstance", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		obj := e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Content-Type", "application/vnd.api+json").
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Authorization", "Bearer "+token).
@@ -521,22 +561,24 @@ func TestSettings(t *testing.T) {
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.instance")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.instance")
 
 		meta := data.Value("meta").Object()
 		instanceRev = meta.Value("rev").String().NotEmpty().NotEqual(instanceRev).Raw()
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("email", "alice@example.net")
-		attrs.ValueEqual("tz", "Europe/Paris")
-		attrs.ValueEqual("locale", "fr")
+		attrs.HasValue("email", "alice@example.net")
+		attrs.HasValue("tz", "Europe/Paris")
+		attrs.HasValue("locale", "fr")
 	})
 
 	t.Run("GetUpdatedInstance", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
+		svc.On("GetLegalNoticeUrl", testInstance).Return("", nil).Once()
 
 		obj := e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Content-Type", "application/vnd.api+json").
@@ -545,22 +587,23 @@ func TestSettings(t *testing.T) {
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.instance")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.instance")
 
 		meta := data.Value("meta").Object()
-		meta.ValueEqual("rev", instanceRev)
+		meta.HasValue("rev", instanceRev)
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("email", "alice@example.net")
-		attrs.ValueEqual("tz", "Europe/Paris")
-		attrs.ValueEqual("locale", "fr")
+		attrs.HasValue("email", "alice@example.net")
+		attrs.HasValue("tz", "Europe/Paris")
+		attrs.HasValue("locale", "fr")
 	})
 
 	t.Run("UpdatePassphraseWithTwoFactorAuth", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.PUT("/settings/instance/auth_mode").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/json").
 			WithHeader("Content-Type", "application/json").
@@ -573,6 +616,7 @@ func TestSettings(t *testing.T) {
 		require.NoError(t, err)
 
 		e.PUT("/settings/instance/auth_mode").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/json").
 			WithHeader("Content-Type", "application/json").
@@ -583,6 +627,7 @@ func TestSettings(t *testing.T) {
 			Expect().Status(204)
 
 		obj := e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Content-Type", "application/json").
 			WithBytes([]byte(`{
@@ -597,6 +642,7 @@ func TestSettings(t *testing.T) {
 		require.NoError(t, err)
 
 		e.PUT("/settings/passphrase").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithJSON(map[string]interface{}{
 				"new_passphrase":      "MyLastPassphrase",
@@ -607,9 +653,10 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("ListClients", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		e.GET("/settings/clients").
+			WithCookie(sessCookie, "connected").
 			Expect().Status(401)
 
 		client := &oauth.Client{
@@ -627,98 +674,68 @@ func TestSettings(t *testing.T) {
 		oauthClientID = client.ClientID
 
 		obj := e.GET("/settings/clients").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Array()
-		data.Length().Equal(2)
+		data.Length().IsEqual(2)
 
-		el := data.Element(1).Object()
-		el.ValueEqual("type", "io.cozy.oauth.clients")
-		el.ValueEqual("id", client.ClientID)
+		el := data.Value(1).Object()
+		el.HasValue("type", "io.cozy.oauth.clients")
+		el.HasValue("id", client.ClientID)
 
 		links := el.Value("links").Object()
-		links.ValueEqual("self", "/settings/clients/"+client.ClientID)
+		links.HasValue("self", "/settings/clients/"+client.ClientID)
 
 		attrs := el.Value("attributes").Object()
-		attrs.ValueEqual("client_name", client.ClientName)
-		attrs.ValueEqual("client_kind", client.ClientKind)
-		attrs.ValueEqual("client_uri", client.ClientURI)
-		attrs.ValueEqual("logo_uri", client.LogoURI)
-		attrs.ValueEqual("policy_uri", client.PolicyURI)
-		attrs.ValueEqual("software_id", client.SoftwareID)
-		attrs.ValueEqual("software_version", client.SoftwareVersion)
+		attrs.HasValue("client_name", client.ClientName)
+		attrs.HasValue("client_kind", client.ClientKind)
+		attrs.HasValue("client_uri", client.ClientURI)
+		attrs.HasValue("logo_uri", client.LogoURI)
+		attrs.HasValue("policy_uri", client.PolicyURI)
+		attrs.HasValue("software_id", client.SoftwareID)
+		attrs.HasValue("software_version", client.SoftwareVersion)
 		attrs.NotContainsKey("client_secret")
 
 		redirectURIs := attrs.Value("redirect_uris").Array()
-		redirectURIs.Length().Equal(1)
-		redirectURIs.First().String().Equal(client.RedirectURIs[0])
+		redirectURIs.Length().IsEqual(1)
+		redirectURIs.Value(0).String().IsEqual(client.RedirectURIs[0])
 	})
 
 	t.Run("RevokeClient", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
-		e.DELETE("/settings/clients/" + oauthClientID).
+		e.DELETE("/settings/clients/"+oauthClientID).
+			WithCookie(sessCookie, "connected").
 			Expect().Status(401)
 
 		e.DELETE("/settings/clients/"+oauthClientID).
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(204)
 
 		obj := e.GET("/settings/clients").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Array()
-		data.Length().Equal(1)
-	})
-
-	t.Run("RedirectOnboardingSecret", func(t *testing.T) {
-		e := httpexpect.Default(t, tsB.URL)
-
-		// Without onboarding
-		e.GET("/settings/onboarded").
-			WithRedirectPolicy(httpexpect.DontFollowRedirects).
-			Expect().Status(303).
-			Header("Location").Equal(testInstance.OnboardedRedirection().String())
-
-		// With onboarding
-		deeplink := "cozydrive://testinstance.com"
-		oauthClient := &oauth.Client{
-			RedirectURIs:     []string{deeplink},
-			ClientName:       "CozyTest",
-			SoftwareID:       "/github.com/cozy-labs/cozy-desktop",
-			OnboardingSecret: "foobar",
-			OnboardingApp:    "test",
-		}
-
-		oauthClient.Create(testInstance)
-
-		redirectURL := e.GET("/settings/onboarded").
-			WithRedirectPolicy(httpexpect.DontFollowRedirects).
-			Expect().Status(303).
-			Header("Location").
-			NotEqual(testInstance.OnboardedRedirection().String()).
-			Contains("/auth/authorize").Raw()
-
-		u, err := url.Parse(redirectURL)
-		require.NoError(t, err)
-
-		values := u.Query()
-		assert.Equal(t, values.Get("redirect_uri"), deeplink)
+		data.Length().IsEqual(1)
 	})
 
 	t.Run("PatchInstanceSameParams", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		doc1, err := testInstance.SettingsDocument()
 		require.NoError(t, err)
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Content-Type", "application/vnd.api+json").
@@ -748,12 +765,13 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchInstanceChangeParams", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		doc, err := testInstance.SettingsDocument()
 		require.NoError(t, err)
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Content-Type", "application/vnd.api+json").
@@ -783,12 +801,13 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchInstanceAddParam", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		doc1, err := testInstance.SettingsDocument()
 		assert.NoError(t, err)
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Content-Type", "application/vnd.api+json").
@@ -819,12 +838,13 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("PatchInstanceRemoveParams", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		doc1, err := testInstance.SettingsDocument()
 		assert.NoError(t, err)
 
 		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			WithHeader("Accept", "application/vnd.api+json").
 			WithHeader("Content-Type", "application/vnd.api+json").
@@ -853,22 +873,23 @@ func TestSettings(t *testing.T) {
 	})
 
 	t.Run("FeatureFlags", func(t *testing.T) {
-		e := testutils.CreateTestClient(t, ts.URL)
+		e := testutils.CreateTestClient(t, tsURL)
 
 		_ = couchdb.DeleteDB(prefixer.GlobalPrefixer, consts.Settings)
 		t.Cleanup(func() { _ = couchdb.DeleteDB(prefixer.GlobalPrefixer, consts.Settings) })
 
 		obj := e.GET("/settings/flags").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data := obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.flags")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.flags")
 
-		data.Value("attributes").Object().Empty()
+		data.Value("attributes").Object().IsEmpty()
 
 		testInstance.FeatureFlags = map[string]interface{}{
 			"from_instance_flag":   true,
@@ -876,7 +897,7 @@ func TestSettings(t *testing.T) {
 			"json_object":          map[string]interface{}{"foo": "bar"},
 		}
 		testInstance.FeatureSets = []string{"set1", "set2"}
-		require.NoError(t, testInstance.Update())
+		require.NoError(t, instance.Update(testInstance))
 
 		cache := config.GetConfig().CacheStorage
 
@@ -921,33 +942,200 @@ func TestSettings(t *testing.T) {
 		assert.NoError(t, err)
 
 		obj = e.GET("/settings/flags").
+			WithCookie(sessCookie, "connected").
 			WithHeader("Authorization", "Bearer "+token).
 			Expect().Status(200).
 			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
 			Object()
 
 		data = obj.Value("data").Object()
-		data.ValueEqual("type", "io.cozy.settings")
-		data.ValueEqual("id", "io.cozy.settings.flags")
+		data.HasValue("type", "io.cozy.settings")
+		data.HasValue("id", "io.cozy.settings.flags")
 
 		attrs := data.Value("attributes").Object()
-		attrs.ValueEqual("from_instance_flag", true)
-		attrs.ValueEqual("from_feature_sets", true)
-		attrs.ValueEqual("from_defaults", true)
-		attrs.ValueEqual("json_object", testInstance.FeatureFlags["json_object"])
-		attrs.ValueEqual("from_multiple_source", "instance_flag")
-		attrs.ValueEqual("ratio_0", "defaults")
-		attrs.ValueEqual("ratio_0.000001", "defaults")
-		attrs.ValueEqual("ratio_0.999999", "context")
-		attrs.ValueEqual("ratio_1", "context")
+		attrs.HasValue("from_instance_flag", true)
+		attrs.HasValue("from_feature_sets", true)
+		attrs.HasValue("from_defaults", true)
+		attrs.HasValue("json_object", testInstance.FeatureFlags["json_object"])
+		attrs.HasValue("from_multiple_source", "instance_flag")
+		attrs.HasValue("ratio_0", "defaults")
+		attrs.HasValue("ratio_0.000001", "defaults")
+		attrs.HasValue("ratio_0.999999", "context")
+		attrs.HasValue("ratio_1", "context")
+	})
+
+	t.Run("ClientsLimitExceededWithoutSession", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, tsURL)
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(401)
+	})
+
+	t.Run("ClientsLimitExceededWithoutLimit", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, tsURL)
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Authorization", "Bearer "+token).
+			WithHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8").
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(302).
+			Header("location").IsEqual(testInstance.DefaultRedirection().String())
+
+		redirect := "cozy://my-app"
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithQuery("redirect", redirect).
+			WithHeader("Authorization", "Bearer "+token).
+			WithHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8").
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(302).
+			Header("location").IsEqual(redirect)
+	})
+
+	t.Run("ClientsLimitExceededWithLimitExceeded", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, tsURL)
+
+		testutils.WithFlag(t, testInstance, "cozy.oauthclients.max", float64(0))
+
+		// Create the OAuth client for the flagship app
+		flagship := oauth.Client{
+			RedirectURIs: []string{"cozy://flagship"},
+			ClientName:   "flagship-app",
+			ClientKind:   "mobile",
+			SoftwareID:   "github.com/cozy/cozy-stack/testing/flagship",
+			Flagship:     true,
+		}
+		require.Nil(t, flagship.Create(testInstance, oauth.NotPending))
+		defer flagship.Delete(testInstance)
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Authorization", "Bearer "+token).
+			WithHost(testInstance.Domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains("Disconnect one of your devices or change your Cozy offer to access your Cozy from this device.").
+			Contains("/#/connectedDevices").
+			NotContains("http://manager.example.org")
+
+		testutils.WithManager(t, testInstance, testutils.ManagerConfig{URL: "http://manager.example.org", WithPremiumLinks: true})
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Authorization", "Bearer "+token).
+			WithHost(testInstance.Domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains("Disconnect one of your devices or change your Cozy offer to access your Cozy from this device.").
+			Contains("/#/connectedDevices").
+			Contains("http://manager.example.org")
+
+		testutils.WithFlag(t, testInstance, "flagship.iap.enabled", true)
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithQuery("isFlagship", true).
+			WithHeader("Authorization", "Bearer "+token).
+			WithHost(testInstance.Domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains("Disconnect one of your devices or change your Cozy offer to access your Cozy from this device.").
+			Contains("/#/connectedDevices").
+			NotContains("http://manager.example.org")
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithQuery("isFlagship", true).
+			WithQuery("isIapAvailable", true).
+			WithHeader("Authorization", "Bearer "+token).
+			WithHost(testInstance.Domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(200).
+			HasContentType("text/html", "utf-8").
+			Body().
+			Contains("Disconnect one of your devices or change your Cozy offer to access your Cozy from this device.").
+			Contains("/#/connectedDevices").
+			Contains("http://manager.example.org")
+	})
+
+	t.Run("ClientsLimitExceededWithLimitReached", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, tsURL)
+
+		clients, _, err := oauth.GetConnectedUserClients(testInstance, 100, "")
+		require.NoError(t, err)
+
+		testutils.WithFlag(t, testInstance, "cozy.oauthclients.max", float64(len(clients)))
+
+		e.GET("/settings/clients/limit-exceeded").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Authorization", "Bearer "+token).
+			WithHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8").
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			Expect().Status(302).
+			Header("location").IsEqual(testInstance.DefaultRedirection().String())
 	})
 }
 
-func fakeAuthentication(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		instance := c.Get("instance").(*instance.Instance)
-		sess, _ := session.New(instance, session.LongRun)
-		c.Set("session", sess)
-		return next(c)
+func TestRegisterPassphraseForFlagshipApp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
 	}
+
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+
+	oauthClient := &oauth.Client{
+		RedirectURIs:    []string{"http:/localhost:4000/oauth/callback"},
+		ClientName:      "Cozy-desktop on my-new-laptop",
+		ClientKind:      "desktop",
+		ClientURI:       "https://docs.cozy.io/en/mobile/desktop.html",
+		LogoURI:         "https://docs.cozy.io/assets/images/cozy-logo-docs.svg",
+		PolicyURI:       "https://cozy.io/policy",
+		SoftwareID:      "/github.com/cozy-labs/cozy-desktop",
+		SoftwareVersion: "0.16.0",
+	}
+
+	setupFlagship := testutils.NewSetup(t, t.Name())
+	testInstance := setupFlagship.GetTestInstance(&lifecycle.Options{
+		Locale:      "en",
+		Timezone:    "Europe/Berlin",
+		Email:       "alice2@example.com",
+		ContextName: "test-context",
+	})
+
+	svc := csettings.NewServiceMock(t)
+	tsURL := setupRouter(t, testInstance, svc).URL
+
+	require.Nil(t, oauthClient.Create(testInstance))
+	client, err := oauth.FindClient(testInstance, oauthClient.ClientID)
+	require.NoError(t, err)
+	require.NoError(t, client.SetFlagship(testInstance))
+
+	e := httpexpect.Default(t, tsURL)
+	obj := e.POST("/settings/passphrase/flagship").
+		WithJSON(map[string]interface{}{
+			"passphrase":     "MyFirstPassphrase",
+			"iterations":     50000,
+			"register_token": hex.EncodeToString(testInstance.RegisterToken),
+			"key":            "xxx-key-xxx",
+			"public_key":     "xxx-public-key-xxx",
+			"private_key":    "xxx-private-key-xxx",
+			"client_id":      client.CouchID,
+			"client_secret":  client.ClientSecret,
+		}).
+		Expect().Status(200).
+		JSON().Object()
+
+	obj.Value("access_token").String().NotEmpty()
+	obj.Value("refresh_token").String().NotEmpty()
+	obj.HasValue("scope", "*")
+	obj.HasValue("token_type", "bearer")
 }

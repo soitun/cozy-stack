@@ -23,8 +23,6 @@ import (
 	"github.com/cozy/cozy-stack/pkg/utils"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/labstack/echo/v4"
-
-	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -37,6 +35,7 @@ var (
 		"confirm_flagship.html",
 		"error.html",
 		"import.html",
+		"install_flagship_app.html",
 		"instance_blocked.html",
 		"login.html",
 		"magic_link_twofactor.html",
@@ -46,11 +45,14 @@ var (
 		"move_link.html",
 		"move_vault.html",
 		"need_onboarding.html",
+		"new_app_available.html",
 		"oidc_login.html",
 		"oidc_twofactor.html",
 		"passphrase_choose.html",
 		"passphrase_reset.html",
+		"share_by_link_password.html",
 		"sharing_discovery.html",
+		"oauth_clients_limit_exceeded.html",
 		"twofactor.html",
 	}
 )
@@ -204,8 +206,10 @@ func (r *renderer) Render(w io.Writer, name string, data interface{}, c echo.Con
 	}
 
 	// Add some CSP for rendered web pages
-	middlewares.AppendCSPRule(c, "default-src", "'self'")
-	middlewares.AppendCSPRule(c, "img-src", "'self' data:")
+	if !config.GetConfig().CSPDisabled {
+		middlewares.AppendCSPRule(c, "default-src", "'self'")
+		middlewares.AppendCSPRule(c, "img-src", "'self' data:")
+	}
 
 	return t.Funcs(funcMap).ExecuteTemplate(w, name, data)
 }
@@ -218,11 +222,11 @@ func AssetPath(domain, name string, context ...string) string {
 	}
 	f, ok := assets.Head(name, ctx)
 	if !ok {
-		logger.WithNamespace("assets").WithFields(logrus.Fields{
+		logger.WithNamespace("assets").WithFields(logger.Fields{
 			"domain":  domain,
 			"name":    name,
 			"context": ctx,
-		}).Errorf("Cannot find asset")
+		}).Infof("Cannot find asset")
 	}
 
 	if ok {

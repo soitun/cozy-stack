@@ -10,10 +10,10 @@ import (
 	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/instance"
 	job "github.com/cozy/cozy-stack/model/job"
+	"github.com/cozy/cozy-stack/model/rag"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/hooks"
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/mail"
 	"github.com/labstack/echo/v4"
@@ -21,17 +21,15 @@ import (
 
 func AskDeletion(inst *instance.Instance) error {
 	clouderies := config.GetConfig().Clouderies
-	var cloudery interface{}
+	var cloudery config.ClouderyConfig
 	cloudery, ok := clouderies[inst.ContextName]
 	if !ok {
 		cloudery = clouderies[config.DefaultInstanceContext]
 	}
-	if cloudery == nil {
-		return nil
-	}
-	api := cloudery.(map[string]interface{})["api"]
-	clouderyURL, _ := api.(map[string]interface{})["url"].(string)
-	clouderyToken, _ := api.(map[string]interface{})["token"].(string)
+
+	api := cloudery.API
+	clouderyURL := api.URL
+	clouderyToken := api.Token
 
 	u, err := url.Parse(clouderyURL)
 	if err != nil {
@@ -58,15 +56,7 @@ func Destroy(domain string) error {
 	if err != nil {
 		return err
 	}
-	return hooks.Execute("remove-instance", []string{domain}, func() error {
-		return destroyWithoutHooks(domain)
-	})
-}
-
-// destroyWithoutHooks is used to remove the instance. The difference with
-// Destroy is that scripts hooks are not executed for this function.
-func destroyWithoutHooks(domain string) error {
-	inst, err := instance.GetFromCouch(domain)
+	inst, err := instance.Get(domain)
 	if err != nil {
 		return err
 	}
@@ -76,7 +66,7 @@ func destroyWithoutHooks(domain string) error {
 		return instance.ErrDeletionAlreadyRequested
 	}
 	inst.Deleting = true
-	if err := inst.Update(); err != nil {
+	if err := instance.Update(inst); err != nil {
 		return err
 	}
 
@@ -87,14 +77,18 @@ func destroyWithoutHooks(domain string) error {
 		return err
 	}
 
+	if err := rag.CleanInstance(inst); err != nil {
+		return err
+	}
+
 	// Reload the instance, it can have been updated in CouchDB if the instance
 	// had at least one account and was not up-to-date for its indexes/views.
-	inst, err = instance.GetFromCouch(domain)
+	inst, err = instance.Get(domain)
 	if err != nil {
 		return err
 	}
 	inst.Deleting = false
-	_ = inst.Update()
+	_ = instance.Update(inst)
 
 	removeTriggers(inst)
 
@@ -108,17 +102,17 @@ func destroyWithoutHooks(domain string) error {
 		return err
 	}
 
-	err = inst.Delete()
+	err = instance.Delete(inst)
 	if couchdb.IsConflictError(err) {
 		// We may need to try again as CouchDB can return an old version of
 		// this document when we have concurrent updates for indexes/views
 		// version and deleting flag.
 		time.Sleep(3 * time.Second)
-		inst, errg := instance.GetFromCouch(domain)
+		inst, errg := instance.Get(domain)
 		if couchdb.IsNotFoundError(errg) {
 			err = nil
 		} else if inst != nil {
-			err = inst.Delete()
+			err = instance.Delete(inst)
 		}
 	}
 	return err

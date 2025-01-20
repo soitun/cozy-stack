@@ -18,6 +18,7 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/job"
 	"github.com/cozy/cozy-stack/model/permission"
+	csettings "github.com/cozy/cozy-stack/model/settings"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
@@ -68,6 +69,7 @@ type Sharing struct {
 
 	// Members[0] is the owner, Members[1...] are the recipients
 	Members []Member `json:"members"`
+	Groups  []Group  `json:"groups,omitempty"`
 
 	// On the owner, credentials[i] is associated to members[i+1]
 	// On a recipient, there is only credentials[0] (for the owner)
@@ -161,7 +163,7 @@ func (s *Sharing) BeOwner(inst *instance.Instance, slug string) error {
 	s.CreatedAt = time.Now()
 	s.UpdatedAt = s.CreatedAt
 
-	name, err := inst.PublicName()
+	name, err := csettings.PublicName(inst)
 	if err != nil {
 		return err
 	}
@@ -483,7 +485,7 @@ func (s *Sharing) RevokePreviewPermissions(inst *instance.Instance) error {
 
 // RevokeRecipient revoke only one recipient on the sharer. After that, if the
 // sharing has still at least one active member, we keep it as is. Else, we
-// desactive the sharing.
+// disable the sharing.
 func (s *Sharing) RevokeRecipient(inst *instance.Instance, index int) error {
 	if !s.Owner {
 		return ErrInvalidSharing
@@ -521,10 +523,17 @@ func (s *Sharing) RevokeRecipientBySelf(inst *instance.Instance, sharingDirTrash
 		inst.Logger().WithNamespace("sharing").
 			Warnf("RevokeRecipientBySelf failed to remove shared refs (%s)': %s", s.ID(), err)
 	}
-	if !sharingDirTrashed && s.FirstFilesRule() != nil {
-		if err := s.RemoveSharingDir(inst); err != nil {
+	if !sharingDirTrashed {
+		if err := s.FixRevokedNotes(inst); err != nil {
 			inst.Logger().WithNamespace("sharing").
-				Warnf("RevokeRecipientBySelf failed to delete dir %s: %s", s.ID(), err)
+				Warnf("RevokeRecipientBySelf failed to fix notes for revoked sharing %s: %s", s.ID(), err)
+		}
+
+		if rule := s.FirstFilesRule(); rule != nil && rule.Mime == "" {
+			if err := s.RemoveSharingDir(inst); err != nil {
+				inst.Logger().WithNamespace("sharing").
+					Warnf("RevokeRecipientBySelf failed to delete dir %s: %s", s.ID(), err)
+			}
 		}
 	}
 	if rule := s.FirstBitwardenOrganizationRule(); rule != nil && len(rule.Values) > 0 {
@@ -606,7 +615,11 @@ func (s *Sharing) RevokeByNotification(inst *instance.Instance) error {
 	if err := RemoveSharedRefs(inst, s.SID); err != nil {
 		return err
 	}
-	if s.FirstFilesRule() != nil {
+	if err := s.FixRevokedNotes(inst); err != nil {
+		inst.Logger().WithNamespace("sharing").
+			Warnf("RevokeByNotification failed to fix notes for revoked sharing %s: %s", s.ID(), err)
+	}
+	if rule := s.FirstFilesRule(); rule != nil && rule.Mime == "" {
 		if err := s.RemoveSharingDir(inst); err != nil {
 			return err
 		}
@@ -707,6 +720,21 @@ func FindSharings(db prefixer.Prefixer, sharingIDs []string) ([]*Sharing, error)
 	return res, nil
 }
 
+// FindActive returns the list of active sharings.
+func FindActive(db prefixer.Prefixer) ([]*Sharing, error) {
+	req := &couchdb.FindRequest{
+		UseIndex: "active",
+		Selector: mango.Equal("active", true),
+		Limit:    1000,
+	}
+	var res []*Sharing
+	err := couchdb.FindDocs(db, consts.Sharings, req, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // GetSharingsByDocType returns all the sharings for the given doctype
 func GetSharingsByDocType(inst *instance.Instance, docType string) (map[string]*Sharing, error) {
 	req := &couchdb.ViewRequest{
@@ -797,6 +825,11 @@ func (s *Sharing) EndInitial(inst *instance.Instance) error {
 		M:    map[string]interface{}{"_id": s.SID},
 	}
 	realtime.GetHub().Publish(inst, realtime.EventDelete, &doc, nil)
+	if rule := s.FirstFilesRule(); rule != nil && rule.Mime == "" {
+		if _, err := s.GetSharingDir(inst); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1361,15 +1394,21 @@ func (s *Sharing) checkSharingMembers() (checks []map[string]interface{}, validM
 
 	for _, m := range s.Members {
 		if m.Status == MemberStatusMailNotSent {
-			checks = append(checks, map[string]interface{}{
-				"id":     s.SID,
-				"type":   "mail_not_sent",
-				"member": m.Instance,
-			})
+			if len(m.Groups) == 0 {
+				checks = append(checks, map[string]interface{}{
+					"id":     s.SID,
+					"type":   "mail_not_sent",
+					"member": m.Instance,
+				})
+			}
 			continue
 		}
 
 		if m.Status != MemberStatusReady {
+			continue
+		}
+
+		if !s.Owner && m.Instance == "" {
 			continue
 		}
 
@@ -1523,15 +1562,15 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 
 	// Build a map of owner docs with their member's counterpart ids
 	ownerKey := ms.Credentials[0].XorKey
-	ownerDocsById := make(map[string]couchdb.JSONDoc)
+	ownerDocsByID := make(map[string]couchdb.JSONDoc)
 	for _, doc := range ownerDocs {
-		ownerDocsById[doc.ID()] = doc
+		ownerDocsByID[doc.ID()] = doc
 	}
 
 	for _, memberDoc := range memberDocs {
 		ownerID := XorID(memberDoc.ID(), ownerKey)
 
-		if ownerDoc, found := ownerDocsById[ownerID]; found {
+		if ownerDoc, found := ownerDocsByID[ownerID]; found {
 			if ownerDoc.Rev() != memberDoc.Rev() {
 				if revision.Generation(ownerDoc.Rev()) < revision.Generation(memberDoc.Rev()) && ms.ReadOnly() {
 					checks = append(checks, map[string]interface{}{
@@ -1565,6 +1604,7 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 						"member":    m.Domain,
 						"ownerDoc":  ownerDoc,
 						"memberRev": memberDoc.Rev(),
+						"memberID":  memberDoc.ID(),
 					})
 				}
 			} else {
@@ -1578,6 +1618,8 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 						"member":     m.Domain,
 						"ownerDoc":   ownerDoc,
 						"memberName": memberDoc.M["name"],
+						"memberRev":  memberDoc.Rev(),
+						"memberID":   memberDoc.ID(),
 					})
 				}
 
@@ -1588,6 +1630,8 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 						"member":         m.Domain,
 						"ownerDoc":       ownerDoc,
 						"memberChecksum": memberDoc.M["checksum"],
+						"memberRev":      memberDoc.Rev(),
+						"memberID":       memberDoc.ID(),
 					})
 				}
 
@@ -1610,12 +1654,14 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 							"member":       m.Domain,
 							"ownerDoc":     ownerDoc,
 							"memberParent": memberDirID,
+							"memberRev":    memberDoc.Rev(),
+							"memberID":     memberDoc.ID(),
 						})
 					}
 				}
 			}
 
-			delete(ownerDocsById, ownerID)
+			delete(ownerDocsByID, ownerID)
 		} else {
 			if ms.ReadOnly() {
 				checks = append(checks, map[string]interface{}{
@@ -1654,7 +1700,7 @@ func (s *Sharing) checkSharingTreesConsistency(inst *instance.Instance, ownerDoc
 	}
 
 	// The only docs left in the map do not exist on the member's instance
-	for _, ownerDoc := range ownerDocsById {
+	for _, ownerDoc := range ownerDocsByID {
 		if wasUpdatedRecently(ownerDoc) {
 			// If the document was created less than 5 minutes ago, we'll
 			// assume the sharing synchronization is still in progress and
@@ -1705,7 +1751,7 @@ func isFileTooBigForInstance(inst *instance.Instance, doc couchdb.JSONDoc) bool 
 	}
 
 	_, _, _, err = vfs.CheckAvailableDiskSpace(inst.VFS(), file)
-	return errors.Is(err, vfs.ErrFileTooBig)
+	return errors.Is(err, vfs.ErrFileTooBig) || errors.Is(err, vfs.ErrMaxFileSize)
 }
 
 // wasUpdatedRecently returns true if the given document's latest update, given

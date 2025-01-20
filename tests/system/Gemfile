@@ -1,0 +1,14 @@
+source 'https://rubygems.org'
+
+gem "amazing_print"
+gem "faker"
+gem "faye-websocket"
+gem "mini_mime"
+gem "minitest"
+gem "pbkdf2-ruby"
+gem "pry"
+gem "pry-rescue"
+gem "pry-stack_explorer"
+gem "rest-client"
+gem "testcontainers"
+gem "uuid"

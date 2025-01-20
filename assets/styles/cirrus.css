@@ -287,6 +287,13 @@
   -webkit-mask-image: url("../icons/doctypes/stats.svg");
   mask-image: url("../icons/doctypes/stats.svg");
 }
+.perm[class^="cc.cozycloud.anouncements"],
+.perm[class^="cc.cozycloud.anouncements.uploads"],
+.perm[class^="cc.cozycloud.anouncements.dev"],
+.perm[class^="cc.cozycloud.anouncements.dev.uploads"] {
+  -webkit-mask-image: url("../icons/doctypes/announcement.svg");
+  mask-image: url("../icons/doctypes/announcement.svg");
+}
 .perm[class^="io-cozy-settings"],
 .perm[class^="io-cozy-bank-settings"] {
   -webkit-mask-image: url("../icons/doctypes/cog.svg");
@@ -327,6 +334,10 @@
 .perm[class^="io-cozy-bank-recipients"] {
   -webkit-mask-image: url("../icons/doctypes/profile.svg");
   mask-image: url("../icons/doctypes/profile.svg");
+}
+.perm[class^="io-cozy-calendar"] {
+  -webkit-mask-image: url("../icons/doctypes/calendar.svg");
+  mask-image: url("../icons/doctypes/calendar.svg");
 }
 .perm[class^="io-cozy-contacts-groups"] {
   -webkit-mask-image: url("../icons/doctypes/team.svg");
@@ -377,6 +388,10 @@
 .perm[class^="io-cozy-timeseries-geojson"] {
   -webkit-mask-image: url("../icons/doctypes/location.svg");
   mask-image: url("../icons/doctypes/location.svg");
+}
+.perm[class^="io-cozy-timeseries-grades"] {
+  -webkit-mask-image: url("../icons/doctypes/school.svg");
+  mask-image: url("../icons/doctypes/school.svg");
 }
 .perm[class^="io-cozy-jobs"] {
   -webkit-mask-image: url("../icons/doctypes/email.svg");
@@ -433,4 +448,7 @@ button.card-intent:hover {
 }
 :not(.expanded) + .collapse {
   display: none;
+}
+.modal-icon .icon-cozy {
+  background: url(../icons/cozy-app-square.svg);
 }
