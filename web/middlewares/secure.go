@@ -314,12 +314,6 @@ func (b cspBuilder) makeCSPHeader(header, cspAllowList string, sources []CSPSour
 		if isSafeDomain(b.instance.OrgDomain) {
 			headers = append(headers, "matrix."+b.instance.OrgDomain)
 		}
-
-		_, domain, found := strings.Cut(b.instance.Domain, ".")
-		if found && isSafeDomain(domain) && isSafeDomain(b.instance.OrgID) {
-			headers = append(headers, "chat-"+b.instance.OrgID+".tc-apps."+domain)
-			headers = append(headers, "auto-login-"+b.instance.OrgID+".tc-apps."+domain)
-		}
 	}
 	// Add org related domains to connect-src directive if present.
 	// OrgID, OrgDomain, and domain are all validated before being injected
@@ -328,11 +322,10 @@ func (b cspBuilder) makeCSPHeader(header, cspAllowList string, sources []CSPSour
 		_, domain, found := strings.Cut(b.instance.Domain, ".")
 		if found && isSafeDomain(domain) {
 			orgDomain := b.instance.OrgID + "." + domain
-			headers = append(headers, "api-login-"+orgDomain)
 			headers = append(headers, orgDomain)
 			headers = append(headers, "wss://"+orgDomain)
 			headers = append(headers, "chat-"+b.instance.OrgID+".tc-apps."+domain)
-			headers = append(headers, "auto-login-"+b.instance.OrgID+".tc-apps."+domain)
+			headers = append(headers, "api-login-"+b.instance.OrgID+".tc-apps."+domain)
 		}
 		if isSafeDomain(b.instance.OrgDomain) {
 			orgAltDomain := b.instance.OrgID + "." + b.instance.OrgDomain
