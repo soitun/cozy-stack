@@ -237,11 +237,10 @@ func TestSecure(t *testing.T) {
 
 		csp := rec.Header().Get(echo.HeaderContentSecurityPolicy)
 
-		apiLoginDomain := "api-login-myorg123.cozy.example.com"
 		orgInstanceDomain := "myorg123.cozy.example.com"
 		orgInstanceWSDomain := "wss://myorg123.cozy.example.com"
 		chatDomain := "chat-myorg123.tc-apps.cozy.example.com"
-		autoLoginDomain := "auto-login-myorg123.tc-apps.cozy.example.com"
+		apiLoginDomain := "api-login-myorg123.tc-apps.cozy.example.com"
 
 		// Verify that connect-src contains the api-login domain
 		connectSrcIndex := strings.Index(csp, "connect-src ")
@@ -253,31 +252,14 @@ func TestSecure(t *testing.T) {
 			"connect-src should end with semicolon")
 
 		connectSrcContent := csp[connectSrcIndex : connectSrcIndex+connectSrcEnd]
-		assert.Contains(t, connectSrcContent, apiLoginDomain,
-			"connect-src should contain %s. Found: %s", apiLoginDomain, connectSrcContent)
 		assert.Contains(t, connectSrcContent, orgInstanceDomain,
 			"connect-src should contain %s. Found: %s", orgInstanceDomain, connectSrcContent)
 		assert.Contains(t, connectSrcContent, orgInstanceWSDomain,
 			"connect-src should contain %s. Found: %s", orgInstanceWSDomain, connectSrcContent)
 		assert.Contains(t, connectSrcContent, chatDomain,
 			"connect-src should contain %s. Found: %s", chatDomain, connectSrcContent)
-		assert.Contains(t, connectSrcContent, autoLoginDomain,
-			"connect-src should contain %s. Found: %s", autoLoginDomain, connectSrcContent)
-
-		// Verify that frame-src contains the Twake Chat domains.
-		frameSrcIndex := strings.Index(csp, "frame-src ")
-		assert.NotEqual(t, -1, frameSrcIndex,
-			"frame-src should be present in CSP. Full CSP: %s", csp)
-
-		frameSrcEnd := strings.Index(csp[frameSrcIndex:], ";")
-		assert.NotEqual(t, -1, frameSrcEnd,
-			"frame-src should end with semicolon")
-
-		frameSrcContent := csp[frameSrcIndex : frameSrcIndex+frameSrcEnd]
-		assert.Contains(t, frameSrcContent, chatDomain,
-			"frame-src should contain %s. Found: %s", chatDomain, frameSrcContent)
-		assert.Contains(t, frameSrcContent, autoLoginDomain,
-			"frame-src should contain %s. Found: %s", autoLoginDomain, frameSrcContent)
+		assert.Contains(t, connectSrcContent, apiLoginDomain,
+			"connect-src should contain %s. Found: %s", apiLoginDomain, connectSrcContent)
 
 		// Verify that other directives do NOT contain the api-login domain
 		otherDirectives := []string{
@@ -301,6 +283,8 @@ func TestSecure(t *testing.T) {
 				directiveEnd := strings.Index(csp[directiveIndex:], ";")
 				if directiveEnd != -1 {
 					directiveContent := csp[directiveIndex : directiveIndex+directiveEnd]
+					assert.NotContains(t, directiveContent, chatDomain,
+						"Directive %s should NOT contain %s. Found: %s", directivePattern, chatDomain, directiveContent)
 					assert.NotContains(t, directiveContent, apiLoginDomain,
 						"Directive %s should NOT contain %s. Found: %s", directivePattern, apiLoginDomain, directiveContent)
 					assert.NotContains(t, directiveContent, orgInstanceDomain,
@@ -323,6 +307,8 @@ func TestSecure(t *testing.T) {
 		imgSrcContent := csp[imgSrcIndex : imgSrcIndex+imgSrcEnd]
 		assert.Contains(t, imgSrcContent, orgInstanceDomain,
 			"img-src should contain %s. Found: %s", orgInstanceDomain, imgSrcContent)
+		assert.NotContains(t, imgSrcContent, chatDomain,
+			"img-src should NOT contain %s. Found: %s", chatDomain, imgSrcContent)
 		assert.NotContains(t, imgSrcContent, apiLoginDomain,
 			"img-src should NOT contain %s. Found: %s", apiLoginDomain, imgSrcContent)
 		assert.NotContains(t, imgSrcContent, orgInstanceWSDomain,
@@ -362,7 +348,7 @@ func TestSecure(t *testing.T) {
 		expectedDomain := "myorg123.example.com"
 		expectedWSDomain := "wss://myorg123.example.com"
 		chatDomain := "chat-myorg123.tc-apps.cozy.example.com"
-		autoLoginDomain := "auto-login-myorg123.tc-apps.cozy.example.com"
+		apiLoginDomain := "api-login-myorg123.tc-apps.cozy.example.com"
 
 		count := strings.Count(csp, expectedDomain)
 		assert.Equal(t, 3, count,
@@ -384,23 +370,8 @@ func TestSecure(t *testing.T) {
 			"connect-src should contain %s. Found: %s", expectedWSDomain, connectSrcContent)
 		assert.Contains(t, connectSrcContent, chatDomain,
 			"connect-src should contain %s. Found: %s", chatDomain, connectSrcContent)
-		assert.Contains(t, connectSrcContent, autoLoginDomain,
-			"connect-src should contain %s. Found: %s", autoLoginDomain, connectSrcContent)
-
-		// Verify that frame-src contains the Twake Chat domains.
-		frameSrcIndex := strings.Index(csp, "frame-src ")
-		assert.NotEqual(t, -1, frameSrcIndex,
-			"frame-src should be present in CSP. Full CSP: %s", csp)
-
-		frameSrcEnd := strings.Index(csp[frameSrcIndex:], ";")
-		assert.NotEqual(t, -1, frameSrcEnd,
-			"frame-src should end with semicolon")
-
-		frameSrcContent := csp[frameSrcIndex : frameSrcIndex+frameSrcEnd]
-		assert.Contains(t, frameSrcContent, chatDomain,
-			"frame-src should contain %s. Found: %s", chatDomain, frameSrcContent)
-		assert.Contains(t, frameSrcContent, autoLoginDomain,
-			"frame-src should contain %s. Found: %s", autoLoginDomain, frameSrcContent)
+		assert.Contains(t, connectSrcContent, apiLoginDomain,
+			"connect-src should contain %s. Found: %s", apiLoginDomain, connectSrcContent)
 
 		// Verify that img-src also contains the org domain
 		imgSrcIndex := strings.Index(csp, "img-src ")
