@@ -46,9 +46,6 @@ func ResolveOrganizationInstances(organizationID, organizationDomain string) (Or
 	resolvedID := organizationID
 	if resolvedID == "" {
 		for _, inst := range list {
-			if inst == nil {
-				continue
-			}
 			resolvedID = strings.TrimSpace(inst.OrgID)
 			if resolvedID != "" {
 				break

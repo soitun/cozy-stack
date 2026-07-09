@@ -6,7 +6,6 @@ import (
 
 	"github.com/cozy/cozy-stack/model/contact"
 	"github.com/cozy/cozy-stack/model/instance"
-	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/utils"
 )
 
@@ -45,10 +44,10 @@ func (patch ContactPatch) shouldSkipOwn(inst *instance.Instance) bool {
 }
 
 func (patch ContactPatch) displayName() string {
-	if strings.TrimSpace(patch.Name) != "" {
-		return strings.TrimSpace(patch.Name)
+	if patch.Name != "" {
+		return patch.Name
 	}
-	name := strings.TrimSpace(strings.TrimSpace(patch.FirstName) + " " + strings.TrimSpace(patch.LastName))
+	name := strings.TrimSpace(patch.FirstName + " " + patch.LastName)
 	if name != "" {
 		return name
 	}
@@ -75,29 +74,27 @@ func contactPatchFromMember(organizationID string, member GroupMember) ContactPa
 	}
 }
 
-func contactPatchFromDoc(organizationID string, doc *couchdb.JSONDoc) ContactPatch {
-	meta := directoryMetadata(doc)
-	contactDoc := &contact.Contact{JSONDoc: *doc}
+func contactPatchFromContact(organizationID string, contactDoc *contact.Contact) ContactPatch {
+	meta := directoryMetadata(&contactDoc.JSONDoc)
 	patch := ContactPatch{OrganizationID: organizationID}
-	patch.Username, _ = meta["username"].(string)
-	patch.Email, _ = meta["email"].(string)
-	patch.WorkplaceFQDN, _ = meta["workplaceFqdn"].(string)
+	patch.Username = meta.Username
+	patch.Email = meta.Email
+	patch.WorkplaceFQDN = meta.WorkplaceFQDN
 	patch.CozyURL = contactDoc.PrimaryCozyURL()
 	if patch.CozyURL == "" {
 		patch.CozyURL = cozyURLFromWorkplaceFQDN(patch.WorkplaceFQDN)
 	}
-	patch.Name = primaryContactName(doc)
+	patch.Name = primaryContactName(contactDoc)
 	patch.Phone = contactDoc.PrimaryPhoneNumber()
 	return patch
 }
 
-func primaryContactName(doc *couchdb.JSONDoc) string {
-	c := &contact.Contact{JSONDoc: *doc}
-	name := c.PrimaryName()
+func primaryContactName(contactDoc *contact.Contact) string {
+	name := contactDoc.PrimaryName()
 	if name != "" {
 		return name
 	}
-	displayName, _ := doc.M["displayName"].(string)
+	displayName, _ := contactDoc.M["displayName"].(string)
 	return displayName
 }
 

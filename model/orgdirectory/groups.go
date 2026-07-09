@@ -177,7 +177,7 @@ func SyncGroupMembersRemoved(ctx context.Context, msg GroupMembersMessage) error
 				return err
 			}
 			input := contactPatchFromMember(msg.OrganizationID, member)
-			c, err := findManagedOrExternalContact(inst, input)
+			c, err := findManagedContact(inst, input)
 			if errors.Is(err, contact.ErrNotFound) {
 				continue
 			}
@@ -224,7 +224,7 @@ func CopyOrgDirectoryFromOrgInstance(ctx context.Context, target *instance.Insta
 }
 
 func copyManagedGroups(ctx context.Context, source, target *instance.Instance, organizationID string) error {
-	groups, err := listManagedJSONDocs(source, consts.Groups, organizationID)
+	groups, err := listManagedGroups(source, organizationID)
 	if err != nil {
 		return fmt.Errorf("copy org directory groups from %s: %w", source.Domain, err)
 	}
@@ -232,17 +232,16 @@ func copyManagedGroups(ctx context.Context, source, target *instance.Instance, o
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		copy := cloneForCreateOrUpdate(g, consts.Groups)
-		copy.SetRev("")
-		if err := couchdb.Upsert(target, copy); err != nil {
-			return fmt.Errorf("copy group %s to %s: %w", copy.ID(), target.Domain, err)
+		g.SetRev("")
+		if err := couchdb.Upsert(target, g); err != nil {
+			return fmt.Errorf("copy group %s to %s: %w", g.ID(), target.Domain, err)
 		}
 	}
 	return nil
 }
 
 func copyManagedContactsWithGroups(ctx context.Context, source, target *instance.Instance, organizationID string) error {
-	contacts, err := listManagedJSONDocs(source, consts.Contacts, organizationID)
+	contacts, err := listManagedContacts(source, organizationID)
 	if err != nil {
 		return fmt.Errorf("copy org directory contacts from %s: %w", source.Domain, err)
 	}
@@ -250,7 +249,7 @@ func copyManagedContactsWithGroups(ctx context.Context, source, target *instance
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		input := contactPatchFromDoc(organizationID, c)
+		input := contactPatchFromContact(organizationID, c)
 		if input.shouldSkipOwn(target) {
 			continue
 		}
@@ -260,7 +259,7 @@ func copyManagedContactsWithGroups(ctx context.Context, source, target *instance
 		if err != nil {
 			return fmt.Errorf("copy contact on %s: %w", target.Domain, err)
 		}
-		changed, err := addContactGroups(stored, contactGroupIDsFromDoc(c))
+		changed, err := addContactGroups(stored, c.GroupIDs())
 		if err != nil {
 			return fmt.Errorf("copy contact groups on %s: %w", target.Domain, err)
 		}
@@ -303,14 +302,13 @@ func upsertGroup(inst *instance.Instance, fields GroupPatch) error {
 		}
 		doc.M = existing.M
 		doc.Type = consts.Groups
-		doc.SetID(groupID)
 		doc.SetRev(existing.Rev())
 	} else if !couchdb.IsNoDatabaseError(err) && !couchdb.IsNotFoundError(err) {
 		return err
 	}
 
-	if fields.Name != nil && strings.TrimSpace(*fields.Name) != "" {
-		doc.M["name"] = strings.TrimSpace(*fields.Name)
+	if fields.Name != nil && *fields.Name != "" {
+		doc.M["name"] = *fields.Name
 	} else if doc.M["name"] == nil {
 		doc.M["name"] = fields.ExternalID
 	}
@@ -347,10 +345,6 @@ func addMembersToGroup(ctx context.Context, inst *instance.Instance, organizatio
 			return err
 		}
 		input := contactPatchFromMember(organizationID, member)
-		if err := input.validate(); err != nil {
-			errs = append(errs, err)
-			continue
-		}
 		if input.shouldSkipOwn(inst) {
 			continue
 		}
@@ -380,7 +374,7 @@ func UpsertManagedContact(inst *instance.Instance, input ContactPatch) (*contact
 	if err := input.validate(); err != nil {
 		return nil, err
 	}
-	c, err := findManagedOrExternalContact(inst, input)
+	c, err := findManagedContact(inst, input)
 	if errors.Is(err, contact.ErrNotFound) {
 		c = contact.New()
 		applyManagedContactFields(c, input)
@@ -399,30 +393,27 @@ func UpsertManagedContact(inst *instance.Instance, input ContactPatch) (*contact
 	return c, nil
 }
 
-func findManagedOrExternalContact(inst *instance.Instance, input ContactPatch) (*contact.Contact, error) {
+func findManagedContact(inst *instance.Instance, input ContactPatch) (*contact.Contact, error) {
 	if input.Email != "" {
-		c, err := findExternalContactByEmail(inst, input.Email)
+		c, err := findManagedContactByEmail(inst, input.Email)
 		if err == nil || !errors.Is(err, contact.ErrNotFound) {
 			return c, err
 		}
 	}
 	if input.CozyURL != "" {
-		return findExternalContactByCozyURL(inst, input.CozyURL)
+		return findManagedContactByCozyURL(inst, input.CozyURL)
 	}
 	return nil, contact.ErrNotFound
 }
 
 func applyManagedContactFields(c *contact.Contact, input ContactPatch) {
-	email := strings.TrimSpace(input.Email)
+	email := input.Email
 	if email != "" {
 		c.M["email"] = []map[string]interface{}{
 			{"address": email, "primary": true},
 		}
 	}
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		name = input.displayName()
-	}
+	name := input.displayName()
 	if name != "" {
 		c.M["fullname"] = name
 		c.M["displayName"] = name
@@ -533,7 +524,7 @@ func refGroupID(ref interface{}) string {
 }
 
 func removeGroupFromManagedContacts(inst *instance.Instance, organizationID, groupID string) error {
-	docs, err := listManagedDocs[contact.Contact](inst, consts.Contacts, organizationID)
+	docs, err := listManagedContacts(inst, organizationID)
 	if err != nil {
 		return err
 	}
@@ -551,17 +542,6 @@ func removeGroupFromManagedContacts(inst *instance.Instance, organizationID, gro
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func cloneForCreateOrUpdate(doc *couchdb.JSONDoc, doctype string) *couchdb.JSONDoc {
-	cloned := doc.Clone().(*couchdb.JSONDoc)
-	cloned.Type = doctype
-	return cloned
-}
-
-func contactGroupIDsFromDoc(doc *couchdb.JSONDoc) []string {
-	c := &contact.Contact{JSONDoc: *doc}
-	return c.GroupIDs()
 }
 
 func validateGroupIdentity(eventName, organizationID, groupID string) error {
@@ -588,12 +568,11 @@ func applyOptionalStringField(m map[string]interface{}, key string, value *strin
 	if value == nil {
 		return
 	}
-	cleaned := strings.TrimSpace(*value)
-	if cleaned == "" {
+	if *value == "" {
 		delete(m, key)
 		return
 	}
-	m[key] = cleaned
+	m[key] = *value
 }
 
 func nonEmptyStringPtr(v string) *string {

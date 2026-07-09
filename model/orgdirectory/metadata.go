@@ -1,6 +1,8 @@
 package orgdirectory
 
 import (
+	"github.com/go-viper/mapstructure/v2"
+
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 )
@@ -10,6 +12,18 @@ const (
 	metadataKindGroup    = "group"
 	metadataKindContact  = "contact"
 )
+
+// DirectoryMetadata describes the B2B organization directory ownership stored
+// on managed contact and group documents.
+type DirectoryMetadata struct {
+	Managed        bool   `json:"managed" mapstructure:"managed"`
+	Kind           string `json:"kind,omitempty" mapstructure:"kind"`
+	OrganizationID string `json:"organizationId,omitempty" mapstructure:"organizationId"`
+	ExternalID     string `json:"externalId,omitempty" mapstructure:"externalId"`
+	Username       string `json:"username,omitempty" mapstructure:"username"`
+	Email          string `json:"email,omitempty" mapstructure:"email"`
+	WorkplaceFQDN  string `json:"workplaceFqdn,omitempty" mapstructure:"workplaceFqdn"`
+}
 
 // IsManagedDirectoryDoctype reports whether a doctype can contain managed
 // organization directory documents.
@@ -21,15 +35,24 @@ func IsManagedDirectoryDoctype(doctype string) bool {
 // by the B2B organization directory replication.
 func IsManagedDirectoryDoc(doc *couchdb.JSONDoc) bool {
 	meta := directoryMetadata(doc)
-	managed, _ := meta["managed"].(bool)
-	return managed
+	return meta.Managed
 }
 
-func directoryMetadata(doc *couchdb.JSONDoc) map[string]interface{} {
+func directoryMetadata(doc *couchdb.JSONDoc) DirectoryMetadata {
 	if doc == nil || doc.M == nil {
-		return nil
+		return DirectoryMetadata{}
 	}
-	meta, _ := doc.M[DirectoryMetadataKey].(map[string]interface{})
+	return decodeDirectoryMetadata(doc.M[DirectoryMetadataKey])
+}
+
+func decodeDirectoryMetadata(raw interface{}) DirectoryMetadata {
+	if raw == nil {
+		return DirectoryMetadata{}
+	}
+	var meta DirectoryMetadata
+	if err := mapstructure.Decode(raw, &meta); err != nil {
+		return DirectoryMetadata{}
+	}
 	return meta
 }
 
@@ -37,11 +60,11 @@ func setGroupDirectoryMetadata(doc *couchdb.JSONDoc, organizationID, externalID 
 	if doc.M == nil {
 		doc.M = make(map[string]interface{})
 	}
-	doc.M[DirectoryMetadataKey] = map[string]interface{}{
-		"managed":        true,
-		"kind":           metadataKindGroup,
-		"organizationId": organizationID,
-		"externalId":     externalID,
+	doc.M[DirectoryMetadataKey] = DirectoryMetadata{
+		Managed:        true,
+		Kind:           metadataKindGroup,
+		OrganizationID: organizationID,
+		ExternalID:     externalID,
 	}
 }
 
@@ -49,12 +72,12 @@ func setContactDirectoryMetadata(doc *couchdb.JSONDoc, input ContactPatch, email
 	if doc.M == nil {
 		doc.M = make(map[string]interface{})
 	}
-	doc.M[DirectoryMetadataKey] = map[string]interface{}{
-		"managed":        true,
-		"kind":           metadataKindContact,
-		"organizationId": input.OrganizationID,
-		"username":       input.Username,
-		"email":          email,
-		"workplaceFqdn":  input.WorkplaceFQDN,
+	doc.M[DirectoryMetadataKey] = DirectoryMetadata{
+		Managed:        true,
+		Kind:           metadataKindContact,
+		OrganizationID: input.OrganizationID,
+		Username:       input.Username,
+		Email:          email,
+		WorkplaceFQDN:  input.WorkplaceFQDN,
 	}
 }

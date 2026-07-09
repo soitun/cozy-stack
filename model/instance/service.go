@@ -79,7 +79,11 @@ func (s *InstanceService) listByOrgField(indexName, fieldName, value string) ([]
 		if err != nil {
 			return nil, err
 		}
-		docs = append(docs, page...)
+		for _, inst := range page {
+			if inst != nil {
+				docs = append(docs, inst)
+			}
+		}
 
 		nextBookmark := ""
 		if res != nil {

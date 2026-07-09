@@ -14,6 +14,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/couchdb/stream"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
+	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/web/files"
 	"github.com/cozy/cozy-stack/web/middlewares"
 	"github.com/labstack/echo/v4"
@@ -49,12 +50,15 @@ func fixErrorNoDatabaseIsWrongDoctype(err error) error {
 	return err
 }
 
+const managedDirectoryWriteReason = "managed organization directory documents are read-only"
+
 func managedDirectoryWriteError() error {
-	return jsonapi.Errorf(http.StatusForbidden, "managed organization directory documents are read-only")
+	return jsonapi.Errorf(http.StatusForbidden, managedDirectoryWriteReason)
 }
 
 func rejectManagedDirectoryCreate(doc *couchdb.JSONDoc) error {
 	if orgdirectory.IsManagedDirectoryDoctype(doc.DocType()) && orgdirectory.IsManagedDirectoryDoc(doc) {
+		logger.WithNamespace("data").Warnf("rejecting create on managed organization directory document %s/%s: %s", doc.DocType(), doc.ID(), managedDirectoryWriteReason)
 		return managedDirectoryWriteError()
 	}
 	return nil
@@ -65,6 +69,15 @@ func rejectManagedDirectoryUpdate(doc, old *couchdb.JSONDoc) error {
 		return nil
 	}
 	if orgdirectory.IsManagedDirectoryDoc(doc) || orgdirectory.IsManagedDirectoryDoc(old) {
+		logger.WithNamespace("data").Warnf("rejecting update on managed organization directory document %s/%s: %s", doc.DocType(), doc.ID(), managedDirectoryWriteReason)
+		return managedDirectoryWriteError()
+	}
+	return nil
+}
+
+func rejectManagedDirectoryDelete(doc *couchdb.JSONDoc) error {
+	if orgdirectory.IsManagedDirectoryDoctype(doc.DocType()) && orgdirectory.IsManagedDirectoryDoc(doc) {
+		logger.WithNamespace("data").Warnf("rejecting delete on managed organization directory document %s/%s: %s", doc.DocType(), doc.ID(), managedDirectoryWriteReason)
 		return managedDirectoryWriteError()
 	}
 	return nil
@@ -321,8 +334,8 @@ func DeleteDoc(c echo.Context) error {
 	doc.Type = doctype
 	doc.SetRev(rev)
 
-	if orgdirectory.IsManagedDirectoryDoctype(doctype) && orgdirectory.IsManagedDirectoryDoc(&doc) {
-		return managedDirectoryWriteError()
+	if err := rejectManagedDirectoryDelete(&doc); err != nil {
+		return err
 	}
 
 	err = middlewares.Allow(c, permission.DELETE, &doc)

@@ -14,7 +14,7 @@ import (
 
 const managedDocsPageSize = 1000
 
-func findExternalContactByEmail(db prefixer.Prefixer, email string) (*contact.Contact, error) {
+func findManagedContactByEmail(db prefixer.Prefixer, email string) (*contact.Contact, error) {
 	matches, err := contact.FindAllByEmail(db, email)
 	if errors.Is(err, contact.ErrNotFound) {
 		return nil, contact.ErrNotFound
@@ -22,10 +22,10 @@ func findExternalContactByEmail(db prefixer.Prefixer, email string) (*contact.Co
 	if err != nil {
 		return nil, err
 	}
-	return singleExternalContact(matches, "email "+email)
+	return singleManagedContact(matches, "email "+email)
 }
 
-func findExternalContactByCozyURL(db prefixer.Prefixer, cozyURL string) (*contact.Contact, error) {
+func findManagedContactByCozyURL(db prefixer.Prefixer, cozyURL string) (*contact.Contact, error) {
 	var docs []*contact.Contact
 	req := &couchdb.FindRequest{
 		Selector: mango.Map{
@@ -35,7 +35,7 @@ func findExternalContactByCozyURL(db prefixer.Prefixer, cozyURL string) (*contac
 				},
 			},
 		},
-		Limit: 10,
+		Limit: 2,
 	}
 	err := couchdb.FindDocsUnoptimized(db, consts.Contacts, req, &docs)
 	if couchdb.IsNoDatabaseError(err) || couchdb.IsNotFoundError(err) {
@@ -47,29 +47,37 @@ func findExternalContactByCozyURL(db prefixer.Prefixer, cozyURL string) (*contac
 	if len(docs) == 0 {
 		return nil, contact.ErrNotFound
 	}
-	return singleExternalContact(docs, "cozy URL "+cozyURL)
+	return singleManagedContact(docs, "cozy URL "+cozyURL)
 }
 
-func singleExternalContact(matches []*contact.Contact, label string) (*contact.Contact, error) {
-	var external []*contact.Contact
+func singleManagedContact(matches []*contact.Contact, label string) (*contact.Contact, error) {
+	var managed []*contact.Contact
 	for _, doc := range matches {
 		if doc.IsExternal() || IsManagedDirectoryDoc(&doc.JSONDoc) {
-			external = append(external, doc)
+			managed = append(managed, doc)
 		}
 	}
-	if len(external) == 0 {
+	if len(managed) == 0 {
 		return nil, contact.ErrNotFound
 	}
-	if len(external) > 1 {
-		return nil, fmt.Errorf("multiple external contacts found for %s", label)
+	if len(managed) > 1 {
+		return nil, fmt.Errorf("multiple managed contacts found for %s", label)
 	}
-	return external[0], nil
+	return managed[0], nil
 }
 
-func listManagedJSONDocs(inst *instance.Instance, doctype, organizationID string) ([]*couchdb.JSONDoc, error) {
-	docs, err := listManagedDocs[couchdb.JSONDoc](inst, doctype, organizationID)
+func listManagedGroups(inst *instance.Instance, organizationID string) ([]*contact.Group, error) {
+	docs, err := listManagedDocs[contact.Group](inst, consts.Groups, organizationID)
 	for _, doc := range docs {
-		doc.Type = doctype
+		doc.Type = consts.Groups
+	}
+	return docs, err
+}
+
+func listManagedContacts(inst *instance.Instance, organizationID string) ([]*contact.Contact, error) {
+	docs, err := listManagedDocs[contact.Contact](inst, consts.Contacts, organizationID)
+	for _, doc := range docs {
+		doc.Type = consts.Contacts
 	}
 	return docs, err
 }
