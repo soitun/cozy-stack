@@ -188,7 +188,7 @@ func TestSyncCreatedOrgContact(t *testing.T) {
 			OrganizationID: orgID,
 		})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "multiple external contacts found for email alice@example.com")
+		require.Contains(t, err.Error(), "multiple managed contacts found for email alice@example.com")
 	})
 
 	t.Run("ContinuesAfterInstanceError", func(t *testing.T) {
@@ -211,7 +211,7 @@ func TestSyncCreatedOrgContact(t *testing.T) {
 			OrganizationID: orgID,
 		})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "multiple external contacts found for email alice@example.com")
+		require.Contains(t, err.Error(), "multiple managed contacts found for email alice@example.com")
 
 		carolContacts, err := contact.FindAllByEmail(carol, "alice@example.com")
 		require.NoError(t, err)
