@@ -82,11 +82,10 @@ func (h *HTTPHandler) getInstance(c echo.Context) error {
 		return err
 	}
 
-	url, err := h.svc.GetLegalNoticeUrl(inst)
-	if err != nil {
-		return err
-	}
-	if url != "" {
+	if url, err := h.svc.GetLegalNoticeUrl(inst); err != nil {
+		inst.Logger().WithNamespace("settings").
+			Warnf("Failed to fetch the legal notice URL from the cloudery: %s", err)
+	} else if url != "" {
 		doc.M["legal_notice_url"] = url
 	}
 

@@ -637,6 +637,22 @@ func TestSettings(t *testing.T) {
 		attrs.HasValue("org_id", "test-org-id-456")
 	})
 
+	t.Run("GetInstanceDegradesWhenLegalNoticeFails", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, tsURL)
+		svc.On("GetLegalNoticeUrl", testInstance).
+			Return("", fmt.Errorf("cloudery is down")).Once()
+
+		obj := e.GET("/settings/instance").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		attrs := obj.Value("data").Object().Value("attributes").Object()
+		attrs.NotContainsKey("legal_notice_url")
+	})
+
 	t.Run("UpdateInstance", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, tsURL)
 
