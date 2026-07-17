@@ -629,6 +629,41 @@ func (s *Sharing) FindMemberByState(state string) (*Member, error) {
 	return nil, ErrMemberNotFound
 }
 
+// MemberFor returns the member of the sharing that corresponds to the given
+// instance (the owner entry on the owner's Cozy, the matching recipient
+// entry on a recipient's Cozy), or nil if the instance is not a member.
+// Revoked members are not returned.
+func (s *Sharing) MemberFor(inst *instance.Instance) *Member {
+	if s.Owner {
+		if len(s.Members) == 0 {
+			return nil
+		}
+		return &s.Members[0]
+	}
+	currDomain := inst.Domain
+	if i := strings.IndexByte(currDomain, ':'); i >= 0 {
+		currDomain = currDomain[:i]
+	}
+	currEmail, _ := inst.SettingsEMail()
+	for i := range s.Members {
+		m := &s.Members[i]
+		if m.Status == MemberStatusRevoked {
+			continue
+		}
+		memberHost := m.InstanceHost()
+		if memberHost == "" {
+			continue
+		}
+		if memberHost == inst.Domain || memberHost == currDomain {
+			return m
+		}
+		if currEmail != "" && m.Email == currEmail {
+			return m
+		}
+	}
+	return nil
+}
+
 // FindMemberBySharecode returns the member that is linked to the sharing by
 // the given sharecode
 func (s *Sharing) FindMemberBySharecode(db prefixer.Prefixer, sharecode string) (*Member, error) {
