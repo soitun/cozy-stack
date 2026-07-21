@@ -17,6 +17,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/couchdb/mango"
 	"github.com/cozy/cozy-stack/pkg/jsonapi"
 	"github.com/cozy/cozy-stack/tests/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -515,4 +516,68 @@ func TestGetInteractCodeConcurrentCalls(t *testing.T) {
 	require.NoError(t, couchdb.FindDocs(inst, consts.Permissions, &req, &perms))
 	require.Len(t, perms, 1)
 	require.Equal(t, permission.ShareInteractPermissionID(sharingID), perms[0].ID())
+}
+
+func TestMemberFor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+	setup := testutils.NewSetup(t, t.Name())
+	inst := setup.GetTestInstance()
+
+	t.Run("Owner", func(t *testing.T) {
+		s := &Sharing{
+			Owner: true,
+			Members: []Member{
+				{Status: MemberStatusOwner, Name: "Alice", Email: "alice@cozy.tools"},
+			},
+		}
+		m := s.MemberFor(inst)
+		if assert.NotNil(t, m) {
+			assert.Equal(t, MemberStatusOwner, m.Status)
+		}
+	})
+
+	t.Run("OwnerNoMembers", func(t *testing.T) {
+		s := &Sharing{Owner: true}
+		assert.Nil(t, s.MemberFor(inst))
+	})
+
+	t.Run("RecipientByDomain", func(t *testing.T) {
+		s := &Sharing{
+			Owner: false,
+			Members: []Member{
+				{Status: MemberStatusOwner, Instance: "https://owner.cozy.tools"},
+				{Status: MemberStatusReady, Instance: "https://" + inst.Domain, ReadOnly: true},
+			},
+		}
+		m := s.MemberFor(inst)
+		if assert.NotNil(t, m) {
+			assert.True(t, m.ReadOnly)
+		}
+	})
+
+	t.Run("NotAMember", func(t *testing.T) {
+		s := &Sharing{
+			Owner: false,
+			Members: []Member{
+				{Status: MemberStatusOwner, Instance: "https://owner.cozy.tools"},
+				{Status: MemberStatusReady, Instance: "https://charlie.cozy.tools"},
+			},
+		}
+		assert.Nil(t, s.MemberFor(inst))
+	})
+
+	t.Run("RevokedMemberSkipped", func(t *testing.T) {
+		s := &Sharing{
+			Owner: false,
+			Members: []Member{
+				{Status: MemberStatusOwner, Instance: "https://owner.cozy.tools"},
+				{Status: MemberStatusRevoked, Instance: "https://" + inst.Domain, ReadOnly: false},
+			},
+		}
+		assert.Nil(t, s.MemberFor(inst))
+	})
 }
