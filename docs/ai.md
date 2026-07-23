@@ -174,7 +174,7 @@ Content-Type: application/json
 - `websearch` enables web search for the query (defaults to `false`).
 - `assistantID` (optional) associates the conversation with an `io.cozy.ai.chat.assistants`
   document. When set, the response includes a `relationships` block.
-- `attachmentIDs` (optional) array of ids, specifying which documents should be leveraged by the RAG. If specified, only the given docs will be used, i.e. no semantic search.
+- `attachmentIDs` (optional) array of ids, specifying which documents should be leveraged by the RAG.
   
 
 #### Response
