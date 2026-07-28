@@ -20,6 +20,7 @@ type Meta struct {
 	Rev            string                  `json:"rev,omitempty"`
 	Warning        string                  `json:"warning,omitempty"`
 	Count          *int                    `json:"count,omitempty"`
+	FileID         string                  `json:"file_id,omitempty"`
 	ExecutionStats *couchdb.ExecutionStats `json:"execution_stats,omitempty"`
 }
 

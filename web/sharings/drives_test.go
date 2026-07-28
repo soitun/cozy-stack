@@ -1338,6 +1338,27 @@ func runCoreSharedDrivesTests(t *testing.T, method DriveCreationMethod) {
 				Expect().Status(404)
 		})
 	})
+
+	t.Run("GetEffectiveRecipients", func(t *testing.T) {
+		// A recipient gets the members list through the proxy: the
+		// resolution happens on the owner instance.
+		obj := eBetty.GET("/sharings/drives/"+sharingID+"/recipients/"+meetingsID).
+			WithHeader("Authorization", "Bearer "+bettyAppToken).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		obj.Path("$.meta.file_id").String().IsEqual(meetingsID)
+		data := obj.Value("data").Array()
+		found := false
+		for _, v := range data.Iter() {
+			attrs := v.Object().Value("attributes").Object()
+			if attrs.Value("email").String().Raw() == "betty@example.net" {
+				found = true
+			}
+		}
+		require.True(t, found, "betty should be in the recipients list")
+	})
 }
 
 // TestCoreSharedDrivesWithBothMethods runs core shared drive tests with both
