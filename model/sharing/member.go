@@ -683,6 +683,34 @@ func (s *Sharing) MemberFor(inst *instance.Instance) *Member {
 	return nil
 }
 
+// MemberMatching returns the member of the sharing that corresponds to the
+// given reference member, matched by email or by instance host. It is used to
+// follow a member across several sharings (e.g. nested shared folders).
+// Only ready members are returned: a recipient that has not accepted the
+// sharing (pending, seen) holds no drive token and must not count in the
+// effective access resolution. Revoked members are not returned either, and
+// neither is the owner entry: a recipient identity must never resolve to the
+// owner (who is never read-only).
+func (s *Sharing) MemberMatching(ref *Member) *Member {
+	if ref == nil {
+		return nil
+	}
+	refHost := ref.InstanceHost()
+	for i := range s.Members {
+		m := &s.Members[i]
+		if m.Status != MemberStatusReady {
+			continue
+		}
+		if ref.Email != "" && m.Email == ref.Email {
+			return m
+		}
+		if refHost != "" && m.InstanceHost() == refHost {
+			return m
+		}
+	}
+	return nil
+}
+
 // FindMemberBySharecode returns the member that is linked to the sharing by
 // the given sharecode
 func (s *Sharing) FindMemberBySharecode(db prefixer.Prefixer, sharecode string) (*Member, error) {
