@@ -6174,3 +6174,116 @@ func TestSharedDriveEffectiveAccessOnMetadataByPath(t *testing.T) {
 			Expect().Status(404)
 	})
 }
+
+func TestSharedDriveDownloadLinksEffectiveAccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	env := setupSharedDrivesEnv(t)
+	eA, _, eD := env.createClients(t)
+
+	// D1: Dave is a read-only member of the whole drive.
+	d1ID, d1RootID, _ := createSharedDrive(t, DriveCreationMethodFromFolder,
+		env.acme, env.acmeToken, env.tsA.URL, "Downloads D1", "d1",
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: true}})
+
+	inScopeFileID := createFile(t, eA, d1RootID, "inside.txt", env.acmeToken)
+
+	// A file outside every drive: Dave has no effective access to it.
+	outsideDirID := createRootDirectory(t, eA, "OutsideDrive", env.acmeToken)
+	outsideFileID := createFile(t, eA, outsideDirID, "outside.txt", env.acmeToken)
+
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d1ID)
+
+	t.Run("DownloadInScopeAllowed", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/downloads").
+			WithQuery("Id", inScopeFileID).
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(200)
+	})
+
+	t.Run("DownloadOutOfScopeNotFound", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/downloads").
+			WithQuery("Id", outsideFileID).
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(404)
+	})
+
+	t.Run("ArchiveInScopeAllowed", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"ids":["` + inScopeFileID + `"]}}}`)).
+			Expect().Status(200)
+	})
+
+	t.Run("ArchiveWithOutOfScopeNotFound", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"ids":["` + inScopeFileID + `","` + outsideFileID + `"]}}}`)).
+			Expect().Status(404)
+	})
+
+	t.Run("ArchiveByPathInScopeAllowed", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"files":["/Downloads D1/inside.txt"]}}}`)).
+			Expect().Status(200)
+	})
+
+	t.Run("ArchiveByPathOutOfScopeNotFound", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"files":["/OutsideDrive/outside.txt"]}}}`)).
+			Expect().Status(404)
+	})
+
+	t.Run("ArchiveByFolderPathAllowed", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"files":["/Downloads D1"]}}}`)).
+			Expect().Status(200)
+	})
+
+	t.Run("DownloadIdAndPathPrefersPath", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/downloads").
+			WithQuery("Id", inScopeFileID).
+			WithQuery("Path", "/OutsideDrive/outside.txt").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(404)
+
+		eD.POST("/sharings/drives/"+d1ID+"/downloads").
+			WithQuery("Id", outsideFileID).
+			WithQuery("Path", "/Downloads D1/inside.txt").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(200)
+	})
+
+	t.Run("ArchiveWithPageOutOfScopeNotFound", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"pages":[{"id":"` + outsideFileID + `","page":1}]}}}`)).
+			Expect().Status(404)
+	})
+
+	t.Run("ArchiveWithPageInScopeAllowed", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d1ID+"/archive").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithBytes([]byte(`{"data":{"type":"io.cozy.archives","attributes":{"pages":[{"id":"` + inScopeFileID + `","page":1}]}}}`)).
+			Expect().Status(200)
+	})
+
+	t.Run("OwnerTokenUnrestricted", func(t *testing.T) {
+		eA.POST("/sharings/drives/"+d1ID+"/downloads").
+			WithQuery("Id", outsideFileID).
+			WithHeader("Authorization", "Bearer "+env.acmeToken).
+			Expect().Status(200)
+	})
+}

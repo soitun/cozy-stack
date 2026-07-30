@@ -362,7 +362,14 @@ member:
   files outside every sharing scope: restore and destroy require effective
   write on the folder the file would be restored to (or on its first
   existing ancestor when the original folder hierarchy was deleted, as the
-  restore recreates it there).
+  restore recreates it there);
+- temporary download links (`POST /sharings/drives/:id/downloads` and `POST
+  /sharings/drives/:id/archive`) require effective read on every target
+  before minting the link. A target outside every sharing scope of the
+  caller is answered `404 Not Found`. The resulting `:secret` URL is not
+  authenticated (by design, so browsers can use it directly), so the link
+  should be treated as a capability: anyone holding it can download the
+  prepared content until it expires.
 
 `GET /sharings/drives/:id/_changes` is not resolved per target: it returns
 the changes of the whole drive to every member. In the additive access mode,
@@ -403,6 +410,8 @@ Two-step download of a single file: creates a short-lived secret link (valid 10 
 
 Identical call to [`POST /files/downloads`](files.md#post-filesdownloads) but over a shared drive. The `links.related` in the response will point to `/sharings/drives/:id/downloads/:secret/:filename` instead of `/files/downloads/...`.
 
+Drive tokens (share-interact) are checked against the member's effective read access on the target file; a target outside every sharing scope of the caller is answered `404 Not Found`.
+
 ### GET /sharings/drives/:id/downloads/:secret/:fake-name
 
 Download the file prepared by the `POST /sharings/drives/:id/downloads` call above. The `:fake-name` segment is ignored by the server — it exists solely so browsers use it as the suggested save-as filename.
@@ -417,6 +426,8 @@ This route is supported only for directory-root shared drives. File-root shared
 drives return `422 Unprocessable Entity`.
 
 The request body follows the same format as [`POST /files/archive`](files.md#post-filesarchive). The `links.related` in the response points to `/sharings/drives/:id/archive/:secret/:name.zip` instead of `/files/archive/...`.
+
+Drive tokens (share-interact) are checked against the member's effective read access on every target (`ids` and `files` entries); any target outside every sharing scope of the caller fails the whole request with `404 Not Found`. The `/` and `/files` pseudo-entries are governed by the VFS permission check only (they cover the whole account, outside any drive scope).
 
 #### Request
 
@@ -916,6 +927,10 @@ shared drive:
 - `POST /sharings/drives/:id/permissions`
 - `PATCH /sharings/drives/:id/permissions/:perm-id`
 - `DELETE /sharings/drives/:id/permissions/:perm-id`
+
+On every route, the targeted file or folder must be **effectively readable**
+by the caller (see the effective access rules in
+[Files and directories](#files-and-directories)).
 
 ### GET /sharings/drives/:id/permissions?ids=...
 
