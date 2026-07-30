@@ -373,6 +373,18 @@ A typical consequence: a member who is read-only on the drive root but has
 write access on a nested shared folder can write inside that folder through
 the drive routes, and is answered `403 Forbidden` elsewhere.
 
+Known limitation: write routes without a file target (`POST
+/sharings/drives/:id/`, `POST /sharings/drives/:id/upload/metadata`, `POST
+/sharings/drives/:id/notes`) are authorized against the effective write
+access on the **drive root**, not on the actual destination folder declared
+in the request body (`dir_id`). As a consequence, a member who is read-only
+on the drive root but has write access on a nested shared folder cannot use
+these routes to target that folder: they get a `403 Forbidden` false
+negative. Clients in that situation should use a targeted route instead
+(`POST /sharings/drives/:id/:file-id` with the destination folder ID), which
+is checked against the effective access of the destination folder. This
+limitation will be lifted with `limited_access` support.
+
 For file-root shared drives (`drive_root_type = file`), iteration 1 currently
 supports only file-shaped routes. Directory-only routes return
 `422 Unprocessable Entity`. `_changes` and realtime are available with exact

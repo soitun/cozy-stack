@@ -5987,6 +5987,56 @@ func TestSharedDriveEffectiveAccessOnTargetedRoutes(t *testing.T) {
 	})
 }
 
+func TestSharedDriveEffectiveAccessOnRootWriteRoutes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	env := setupSharedDrivesEnv(t)
+	eA, _, eD := env.createClients(t)
+
+	// D1: Dave has write access on the whole drive.
+	d1ID, d1RootID, _ := createSharedDrive(t, DriveCreationMethodFromFolder,
+		env.acme, env.acmeToken, env.tsA.URL, "Root Write D1", "d1",
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: false}})
+
+	subDirID := createDirectory(t, eA, d1RootID, "Sub", env.acmeToken)
+
+	// D2: nested drive on Sub, Dave is read-only there, but keeps write
+	// access on its root through the ancestor D1 scope.
+	d2ID := createDriveOnFolder(t, eA, env.acme, subDirID, env.acmeToken,
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: true}})
+
+	// D3: independent drive where Dave is read-only everywhere.
+	d3ID, d3RootID, _ := createSharedDrive(t, DriveCreationMethodFromFolder,
+		env.acme, env.acmeToken, env.tsA.URL, "Root Write D3", "d3",
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: true}})
+
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d1ID)
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d2ID)
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d3ID)
+
+	notePayload := func(dirID string) string {
+		return `{"data":{"type":"io.cozy.notes.documents","attributes":{"title":"N","dir_id":"` + dirID + `","schema":{"nodes":[["doc",{"content":"block+"}],["paragraph",{"content":"inline*","group":"block"}],["text",{"group":"inline"}]],"marks":[],"topNode":"doc"}}}}`
+	}
+
+	t.Run("RootWriteAllowedViaAncestorScope", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d2ID+"/notes").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/json").
+			WithBytes([]byte(notePayload(subDirID))).
+			Expect().Status(201)
+	})
+
+	t.Run("RootWriteDeniedForReadOnlyMember", func(t *testing.T) {
+		eD.POST("/sharings/drives/"+d3ID+"/notes").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			WithHeader("Content-Type", "application/json").
+			WithBytes([]byte(notePayload(d3RootID))).
+			Expect().Status(403)
+	})
+}
+
 func TestSharedDriveEffectiveAccessOnMoveDestination(t *testing.T) {
 	if testing.Short() {
 		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
