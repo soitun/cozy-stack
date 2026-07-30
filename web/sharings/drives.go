@@ -255,8 +255,56 @@ func HeadDirOrFile(c echo.Context, inst *instance.Instance, s *sharing.Sharing) 
 	return nil
 }
 
+// authorizeDriveTarget resolves the effective access of the given drive
+// member on the target; 404 hides targets outside every sharing scope, to
+// avoid revealing which paths exist on the instance.
+func authorizeDriveTarget(inst *instance.Instance, member *sharing.Member, targetID string) (*sharing.EffectiveAccess, error) {
+	ea, err := sharing.NewAccessResolver(inst).ResolveForMember(targetID, member)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, jsonapi.NotFound(errors.New("shared drive target not found"))
+		}
+		return nil, wrapErrors(err)
+	}
+	if !ea.CanRead {
+		return nil, jsonapi.NotFound(errors.New("shared drive target not found"))
+	}
+	return ea, nil
+}
+
+// checkDriveMemberRead asserts the calling drive member (if any) has
+// effective read access on the target. No-op for non-member tokens (owner,
+// share-by-link).
+func checkDriveMemberRead(c echo.Context, inst *instance.Instance, targetID string) error {
+	member := GetSharedDriveMember(c)
+	if member == nil {
+		return nil
+	}
+	_, err := authorizeDriveTarget(inst, member, targetID)
+	return err
+}
+
 // ReadMetadataFromPath allows to get file/dir information for a path.
 func ReadMetadataFromPath(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
+	// Drive tokens are checked against the member's effective read access on
+	// the resolved target; other tokens keep the VFS permission check done
+	// by files.ReadMetadataFromPath. A target outside every sharing scope is
+	// answered 404 to avoid revealing which paths exist on the instance.
+	if GetSharedDriveMember(c) != nil && c.QueryParam("Path") != "" {
+		dir, file, err := inst.VFS().DirOrFileByPath(c.QueryParam("Path"))
+		if err != nil {
+			return jsonapi.NotFound(errors.New("shared drive target not found"))
+		}
+		var targetID string
+		if dir != nil {
+			targetID = dir.DocID
+		} else {
+			targetID = file.DocID
+		}
+		if err := checkDriveMemberRead(c, inst, targetID); err != nil {
+			return err
+		}
+	}
 	return files.ReadMetadataFromPath(c, s)
 }
 
@@ -339,6 +387,14 @@ func ModifyMetadataByIDHandler(c echo.Context, inst *instance.Instance, s *shari
 		rootID, err := s.DriveRootID()
 		if err == nil && c.Param("file-id") == rootID {
 			return jsonapi.NewError(http.StatusUnprocessableEntity, "cannot move the root of a shared drive")
+		}
+		// ponytail: destination check lives in the handler, not in
+		// guardSharedDriveRouteForMember, because the guard cannot read the
+		// request body without consuming it.
+		if member := GetSharedDriveMember(c); member != nil {
+			if err := checkEffectiveAccessForMember(inst, *patch.DirID, permission.POST, member); err != nil {
+				return err
+			}
 		}
 	}
 	if err = applyPatch(c, inst.VFS(), patch); err != nil {
@@ -481,7 +537,7 @@ func CreationHandler(c echo.Context, inst *instance.Instance, s *sharing.Sharing
 // DestroyFileHandler handles DELETE requests to clear one element from the
 // trash.
 func DestroyFileHandler(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
-	return files.DestroyFileHandler(c)
+	return files.Destroy(c, s)
 }
 
 // OverwriteFileContentHandler handles PUT requests to overwrite the content of
@@ -708,7 +764,19 @@ func validateSharedDrivePermissionTargetID(
 	if err != nil {
 		return jsonapi.BadRequest(errors.New("file is not within the shared drive"))
 	}
-	if dir != nil {
+
+	// The caller must be able to read the target. Drive tokens are checked
+	// against the member's effective access; other tokens keep the VFS
+	// permission check.
+	member, err := sharedDriveInteractMember(c, inst, s)
+	if err != nil {
+		return err
+	}
+	if member != nil {
+		if err := checkEffectiveAccessForMember(inst, fileID, permission.GET, member); err != nil {
+			return err
+		}
+	} else if dir != nil {
 		if err := middlewares.AllowVFS(c, permission.GET, dir); err != nil {
 			return err
 		}
@@ -1395,6 +1463,14 @@ func proxy(fn func(c echo.Context, inst *instance.Instance, s *sharing.Sharing) 
 		}
 
 		if s.Owner {
+			member, err := sharedDriveInteractMember(c, inst, s)
+			if err != nil {
+				return err
+			}
+			SetSharedDriveMember(c, member)
+			if err := guardSharedDriveRouteForMember(c, inst, s); err != nil {
+				return err
+			}
 			return fn(c, inst, s)
 		}
 
@@ -1409,13 +1485,6 @@ func proxy(fn func(c echo.Context, inst *instance.Instance, s *sharing.Sharing) 
 			verb := permission.Verb(method)
 			if err := middlewares.AllowWholeType(c, verb, consts.Files); err != nil {
 				return err
-			}
-
-			if shouldCheck, requireWrite := sharedDrivePermissionCheck(method, c.Request().URL.Path); shouldCheck {
-				_, err := checkSharedDrivePermission(inst, c.Param("id"), requireWrite)
-				if err != nil {
-					return err
-				}
 			}
 		}
 
@@ -1437,6 +1506,20 @@ func proxy(fn func(c echo.Context, inst *instance.Instance, s *sharing.Sharing) 
 			middlewares.ForcePermission(c, nil)
 			c.Set("claims", nil)
 			middlewares.SetInstance(c, owner)
+			ownerSharing, err := sharing.FindSharing(owner, c.Param("id"))
+			if err != nil {
+				return wrapErrors(err)
+			}
+			// The member must be resolved against the owner's instance and
+			// sharing: the recipient-side member would authorize nothing here.
+			ownerMember, err := sharedDriveInteractMember(c, owner, ownerSharing)
+			if err != nil {
+				return err
+			}
+			SetSharedDriveMember(c, ownerMember)
+			if err := guardSharedDriveRouteForMember(c, owner, ownerSharing); err != nil {
+				return err
+			}
 			return fn(c, owner, s)
 		}
 
@@ -1454,6 +1537,210 @@ func proxy(fn func(c echo.Context, inst *instance.Instance, s *sharing.Sharing) 
 		proxy.ErrorLog = log.New(logger, "", 0)
 		proxy.ServeHTTP(c.Response(), c.Request())
 		return nil
+	}
+}
+
+// contextDriveMember is the echo context key where proxy stores the drive
+// member resolved for the request, once, before the guard and handlers run.
+const contextDriveMember = "drive-member"
+
+// SetSharedDriveMember stores the resolved drive member in the echo context.
+// Called by proxy right before the guard runs, on the instance that
+// authorizes the request (the owner's). A nil member marks a resolved
+// non-member request (owner's own token, share-by-link).
+func SetSharedDriveMember(c echo.Context, member *sharing.Member) {
+	c.Set(contextDriveMember, member)
+}
+
+// GetSharedDriveMember returns the drive member stored by proxy, or nil for
+// non-member tokens. Only valid on drive routes, after proxy ran.
+func GetSharedDriveMember(c echo.Context) *sharing.Member {
+	member, _ := c.Get(contextDriveMember).(*sharing.Member)
+	return member
+}
+
+// sharedDriveInteractMember resolves the sharing member behind the request
+// token. It returns (nil, nil) when the request does not carry a drive token
+// (share-interact): the owner's own tokens and public secret routes carry no
+// member identity and are not constrained by effective access.
+func sharedDriveInteractMember(c echo.Context, inst *instance.Instance, s *sharing.Sharing) (*sharing.Member, error) {
+	pdoc, err := middlewares.GetPermission(c)
+	if err != nil || pdoc.Type != permission.TypeShareInteract {
+		return nil, nil
+	}
+	token := middlewares.GetRequestToken(c)
+	member, err := s.FindMemberByInteractCode(inst, token)
+	if err != nil {
+		return nil, wrapErrors(err)
+	}
+	if member == nil {
+		return nil, jsonapi.Forbidden(errors.New("not a member of this sharing"))
+	}
+	return member, nil
+}
+
+// guardSharedDriveRouteForMember authorizes a request reaching the owner of
+// a shared drive against the effective access of the calling member on the
+// target file or folder. Only drive tokens (share-interact) are constrained
+// this way: the owner's own tokens have full rights, and public secret
+// routes carry no member identity (AllowVFS in the handlers governs them).
+// The member is resolved once by proxy and read from the context.
+func guardSharedDriveRouteForMember(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
+	member := GetSharedDriveMember(c)
+	if member == nil {
+		return nil
+	}
+
+	method := c.Request().Method
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
+	verb := permission.Verb(method)
+	reqPath := c.Request().URL.Path
+	fileID := c.Param("file-id")
+
+	// Share-by-link routes keep their own authorization layer. Match the
+	// registered route pattern, not the raw URL, so a future route whose
+	// path contains "/permissions" cannot silently bypass this guard.
+	if strings.HasPrefix(c.Path(), "/sharings/drives/:id/permissions") {
+		return nil
+	}
+	// Trashed files are outside every sharing scope: the effective access
+	// resolver cannot see them. Restore and destroy are authorized against
+	// the effective write access on the folder the file would be restored
+	// to (which is also where destroy removes it from, logically).
+	if strings.Contains(reqPath, "/trash/") {
+		if shouldCheck, requireWrite := sharedDrivePermissionCheck(method, reqPath); !shouldCheck || !requireWrite {
+			return nil
+		}
+		if err := checkTrashEffectiveAccess(inst, fileID, member); err != nil {
+			return err
+		}
+		// The guard has authorized the request: the handlers skip their VFS
+		// permission check for share-interact tokens (it cannot succeed on a
+		// trashed file, which has lost its referenced_by and whose path is
+		// outside the sharing rules). See files.driveMemberAuthorized.
+		return nil
+	}
+
+	// Write routes without a file target create content at the drive root:
+	// they require effective write on the root folder.
+	//
+	// ponytail: POST /upload/metadata is checked against the drive root,
+	// not the dir_id declared in its body; resolve the body dir_id when
+	// limited_access lands.
+	if fileID == "" {
+		if shouldCheck, requireWrite := sharedDrivePermissionCheck(method, reqPath); !shouldCheck || !requireWrite {
+			return nil
+		}
+		rootID, err := s.DriveRootID()
+		if err != nil {
+			return wrapErrors(err)
+		}
+		return checkEffectiveAccessForMember(inst, rootID, permission.POST, member)
+	}
+
+	// Copy needs effective read on the source and effective write on the
+	// destination folder. File-root drives do not support copy: let the
+	// handler answer 422.
+	if method == http.MethodPost && strings.HasSuffix(reqPath, "/copy") {
+		if s.HasFileDriveRoot() {
+			return nil
+		}
+		if err := checkEffectiveAccessForMember(inst, fileID, permission.GET, member); err != nil {
+			return err
+		}
+		destID := c.QueryParam("DirID")
+		if destID == "" {
+			file, err := inst.VFS().FileByID(fileID)
+			if err != nil {
+				return files.WrapVfsError(err)
+			}
+			destID = file.DirID
+		}
+		return checkEffectiveAccessForMember(inst, destID, permission.POST, member)
+	}
+
+	return checkEffectiveAccessForMember(inst, fileID, verb, member)
+}
+
+// checkEffectiveAccessForMember checks that the given sharing member has the
+// effective access required by verb on the target file or folder.
+func checkEffectiveAccessForMember(inst *instance.Instance, targetID string, verb permission.Verb, member *sharing.Member) error {
+	ea, err := authorizeDriveTarget(inst, member, targetID)
+	if err != nil {
+		return err
+	}
+	if !ea.Can(verb) {
+		return jsonapi.Forbidden(errors.New("insufficient access on the target file or folder"))
+	}
+	return nil
+}
+
+// checkTrashEffectiveAccess authorizes a restore or destroy of a trashed
+// file against the member's effective write access on the folder the file
+// would be restored to. A trashed file is outside every sharing scope, so
+// the check walks up from the restore folder to the first existing ancestor
+// (the restore recreates the missing hierarchy under it via MkdirAll) and
+// resolves the effective access there. A file whose restore folder is in no
+// sharing scope (e.g. trashed from outside any drive) is rejected.
+func checkTrashEffectiveAccess(inst *instance.Instance, fileID string, member *sharing.Member) error {
+	fs := inst.VFS()
+	dir, file, err := fs.DirOrFileByID(fileID)
+	if err != nil {
+		return files.WrapVfsError(err)
+	}
+
+	var restorePath, docPath string
+	if dir != nil {
+		restorePath = dir.RestorePath
+		docPath = dir.Fullpath
+	} else {
+		restorePath = file.RestorePath
+		docPath, err = file.Path(fs)
+		if err != nil {
+			return files.WrapVfsError(err)
+		}
+	}
+
+	// A file trashed with its parent hierarchy has no restore path of its
+	// own: resolve it from the trashed root folder, like getRestoreDir does.
+	if restorePath == "" {
+		rel := strings.TrimPrefix(docPath, vfs.TrashDirName+"/")
+		split := strings.Index(rel, "/")
+		if split < 0 {
+			// ponytail: no resolvable restore root; getRestoreDir would fall
+			// back to the instance root, which is in no sharing scope.
+			return jsonapi.Forbidden(errors.New("insufficient access on the target file or folder"))
+		}
+		root, err := fs.DirByPath(vfs.TrashDirName + "/" + rel[:split])
+		if err != nil {
+			return files.WrapVfsError(err)
+		}
+		rest := path.Dir(rel[split+1:])
+		restorePath = path.Join(root.RestorePath, root.DocName, rest)
+	}
+	// The restore path is the folder the file or directory is restored into
+	// (and the directory itself is recreated inside it): that is where the
+	// write happens.
+	parentPath := restorePath
+
+	// Walk up to the first existing ancestor: the restore recreates the
+	// missing hierarchy under it, so that ancestor is where the write
+	// actually happens.
+	for {
+		ancestor, err := fs.DirByPath(parentPath)
+		if err == nil {
+			return checkEffectiveAccessForMember(inst, ancestor.ID(), permission.POST, member)
+		}
+		if !os.IsNotExist(err) {
+			return files.WrapVfsError(err)
+		}
+		next := path.Dir(parentPath)
+		if next == parentPath {
+			return jsonapi.Forbidden(errors.New("insufficient access on the target file or folder"))
+		}
+		parentPath = next
 	}
 }
 

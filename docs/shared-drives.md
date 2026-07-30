@@ -337,6 +337,42 @@ Content-Type: application/vnd.api+json
 Unless stated otherwise, a permission on the whole `io.cozy.files` doctype is
 required to use the following routes.
 
+Authorization is resolved against the **effective access** of the target file
+or folder, not only the membership of the route's shared drive. The effective
+access combines every sharing scope applying to the target (the sharing of
+the route, plus any nested shared folder on its path) where the caller is a
+member:
+
+- read routes targeting a file or folder by its ID (`GET`/`HEAD
+  .../:file-id`, download, thumbnails) require effective read on the target;
+- `GET /sharings/drives/:id/metadata` requires effective read on the folder
+  or file resolved from its `Path` query parameter, and answers
+  `404 Not Found` when the path resolves outside every sharing scope of the
+  caller (so that the existence of paths outside the drive is not revealed);
+- write, update and delete routes (`POST`, `PUT`, `PATCH`, `DELETE`) require
+  effective write on the target file or folder;
+- creation and upload routes require effective write on the destination
+  folder;
+- `PATCH` (metadata update, rename) requires effective write on the source
+  item; a move (the `parent` relationship) additionally requires effective
+  write on the destination folder;
+- `POST /sharings/drives/:id/:file-id/copy` requires effective read on the
+  source file and effective write on the destination folder;
+- trash routes (`POST`/`DELETE /sharings/drives/:id/trash/:file-id`) target
+  files outside every sharing scope: restore and destroy require effective
+  write on the folder the file would be restored to (or on its first
+  existing ancestor when the original folder hierarchy was deleted, as the
+  restore recreates it there).
+
+`GET /sharings/drives/:id/_changes` is not resolved per target: it returns
+the changes of the whole drive to every member. In the additive access mode,
+every member of the drive can read every file of the drive anyway, so no
+per-line filtering is needed.
+
+A typical consequence: a member who is read-only on the drive root but has
+write access on a nested shared folder can write inside that folder through
+the drive routes, and is answered `403 Forbidden` elsewhere.
+
 For file-root shared drives (`drive_root_type = file`), iteration 1 currently
 supports only file-shaped routes. Directory-only routes return
 `422 Unprocessable Entity`. `_changes` and realtime are available with exact
