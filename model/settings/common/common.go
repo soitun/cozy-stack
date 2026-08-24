@@ -127,6 +127,9 @@ func UpdateCommonSettings(inst *instance.Instance, settings *couchdb.JSONDoc) (b
 		if email, ok := settings.M["email"].(string); ok {
 			addDiff("email", remote.Payload.Email, email)
 		}
+		if matrixID, _ := settings.M["matrix_id"].(string); matrixID != "" {
+			addDiff("matrix_id", remote.Payload.MatrixID, matrixID)
+		}
 
 		log.Warnf("common settings out of sync: local=%d remote=%d", inst.CommonSettingsVersion, remote.Version)
 		if len(diffs) > 0 {
@@ -307,7 +310,9 @@ func buildRequest(inst *instance.Instance, settings *couchdb.JSONDoc) UserSettin
 	if phone, ok := settings.M["phone"].(string); ok {
 		request.Payload.Phone = phone
 	}
-	if len(parts) > 1 {
+	if matrixID, _ := settings.M["matrix_id"].(string); IsMatrixID(matrixID) {
+		request.Payload.MatrixID = matrixID
+	} else if len(parts) > 1 {
 		// The Matrix localpart comes from the email local part, which preserves
 		// dots and can differ from the domain slug. Fall back to the slug when
 		// no email is available. The homeserver part stays domain-derived.
@@ -321,6 +326,22 @@ func buildRequest(inst *instance.Instance, settings *couchdb.JSONDoc) UserSettin
 	}
 
 	return request
+}
+
+// maxMatrixIDLength is the maximum length of a Matrix user ID.
+const maxMatrixIDLength = 255
+
+// IsMatrixID reports whether id has the `@localpart:server` shape. A stored
+// value that fails the check is ignored in favour of the derived one.
+func IsMatrixID(id string) bool {
+	if len(id) > maxMatrixIDLength || !strings.HasPrefix(id, "@") {
+		return false
+	}
+	if strings.ContainsAny(id, " \t\r\n") {
+		return false
+	}
+	localpart, server, found := strings.Cut(id[1:], ":")
+	return found && localpart != "" && server != ""
 }
 
 func addAvatarURL(inst *instance.Instance, request *UserSettingsRequest, version int) {

@@ -305,9 +305,15 @@ Example payload for `user.created`:
   "workplaceFqdn": "alice.example.twake.app",
   "organizationId": "org-uuid-123",
   "organizationDomain": "example.com",
-  "canUpgrade": false
+  "canUpgrade": false,
+  "matrixId": "@alice:example.twake.app"
 }
 ```
+
+`matrixId` is optional. When it is present and well-formed, it is saved as
+`matrix_id` in the instance settings document and sent to the common settings
+API as the account's Matrix identity; otherwise the Matrix ID is derived from
+the email local part and the instance domain.
 
 
 Example payload for `b2b/domain.user.deleted`:
