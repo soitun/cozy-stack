@@ -14,6 +14,7 @@ import (
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/orgdirectory"
+	"github.com/cozy/cozy-stack/model/settings/common"
 	"github.com/cozy/cozy-stack/pkg/consts"
 	"github.com/cozy/cozy-stack/pkg/crypto"
 	"github.com/cozy/cozy-stack/pkg/logger"
@@ -140,6 +141,7 @@ type UserCreatedMessage struct {
 	WorkplaceFqdn      string `json:"workplaceFqdn"` // The fully qualified workplace domain
 	OrganizationID     string `json:"organizationId,omitempty"`
 	OrganizationDomain string `json:"organizationDomain,omitempty"`
+	MatrixID           string `json:"matrixId,omitempty"` // Stored as received, it takes precedence over the ID derived from the email
 }
 
 // Handle processes a user created message.
@@ -154,11 +156,12 @@ func (h *UserCreatedHandler) Handle(ctx context.Context, d amqp.Delivery) error 
 	log.Debugf("user.created: successfully unmarshaled message for TwakeID: %s", msg.TwakeID)
 
 	// Log incoming message with masked sensitive data
-	log.Infof("user.created: processing message - TwakeID: %s, Domain: %s, Mobile: %s, InternalEmail: %s, Iterations: %d, Hash: %s, PublicKey: %s, PrivateKey: %s, Key: %s, Timestamp: %d",
+	log.Infof("user.created: processing message - TwakeID: %s, Domain: %s, Mobile: %s, InternalEmail: %s, MatrixID: %s, Iterations: %d, Hash: %s, PublicKey: %s, PrivateKey: %s, Key: %s, Timestamp: %d",
 		msg.TwakeID,
 		msg.Domain,
 		msg.Mobile,
 		msg.InternalEmail,
+		msg.MatrixID,
 		msg.Iterations,
 		maskSensitiveData(msg.Hash),
 		maskSensitiveData(msg.PublicKey),
@@ -225,6 +228,12 @@ func (h *UserCreatedHandler) Handle(ctx context.Context, d amqp.Delivery) error 
 		log.Infof("user.created: successfully updated passphrase for instance: %s (PasswordDefined: %v)", inst.Domain, inst.PasswordDefined)
 	}
 
+	if matrixID := strings.TrimSpace(msg.MatrixID); matrixID != "" {
+		if err := storeMatrixID(inst, matrixID); err != nil {
+			return err
+		}
+	}
+
 	if strings.TrimSpace(msg.OrganizationID) != "" || strings.TrimSpace(msg.OrganizationDomain) != "" {
 		scope, err := orgdirectory.ResolveOrganizationInstances(msg.OrganizationID, msg.OrganizationDomain)
 		if err != nil {
@@ -244,6 +253,34 @@ func (h *UserCreatedHandler) Handle(ctx context.Context, d amqp.Delivery) error 
 		}
 	}
 
+	return nil
+}
+
+// storeMatrixID saves the Matrix ID carried by a user.created message, which
+// buildRequest then forwards in place of the one derived from the email. A
+// malformed ID is dropped rather than retried, and an unchanged one is patched
+// anyway so a redelivery retries the common settings push.
+func storeMatrixID(inst *instance.Instance, matrixID string) error {
+	if !common.IsMatrixID(matrixID) {
+		log.Warnf("user.created: ignoring malformed matrix id %q for instance: %s", matrixID, inst.Domain)
+		return nil
+	}
+
+	settings, err := inst.SettingsDocument()
+	if err != nil {
+		return fmt.Errorf("user.created: get settings document: %w", err)
+	}
+
+	settings.M["matrix_id"] = matrixID
+
+	if err := lifecycle.Patch(inst, &lifecycle.Options{
+		SettingsObj:  settings,
+		FromCloudery: true, // XXX: the Cloudery has no matrix_id field
+	}); err != nil {
+		return fmt.Errorf("user.created: update matrix id: %w", err)
+	}
+
+	log.Infof("user.created: stored matrix id for instance: %s", inst.Domain)
 	return nil
 }
 

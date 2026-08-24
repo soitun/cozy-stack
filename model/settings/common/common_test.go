@@ -2,6 +2,7 @@ package common
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cozy/cozy-stack/model/instance"
@@ -10,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildRequest_MatrixIDFromEmail(t *testing.T) {
+func TestBuildRequest_MatrixID(t *testing.T) {
 	inst := &instance.Instance{Domain: "alicewonderland.stg.lin-saas.com"}
 
 	t.Run("email localpart preserves dots and drives the matrix id", func(t *testing.T) {
@@ -43,6 +44,68 @@ func TestBuildRequest_MatrixIDFromEmail(t *testing.T) {
 		req := buildRequest(local, settings)
 		require.Empty(t, req.Payload.MatrixID)
 	})
+
+	t.Run("a stored matrix id wins over the email and is sent as is", func(t *testing.T) {
+		settings := &couchdb.JSONDoc{M: map[string]interface{}{
+			"matrix_id": "@al.ice:stg.lin-saas.com",
+			"email":     "alicewonderland@stg.lin-saas.com",
+		}}
+		req := buildRequest(inst, settings)
+		require.Equal(t, "@al.ice:stg.lin-saas.com", req.Payload.MatrixID)
+	})
+
+	t.Run("an empty stored matrix id falls back to the email", func(t *testing.T) {
+		settings := &couchdb.JSONDoc{M: map[string]interface{}{
+			"matrix_id": "",
+			"email":     "al.ice@stg.lin-saas.com",
+		}}
+		req := buildRequest(inst, settings)
+		require.Equal(t, "@al.ice:stg.lin-saas.com", req.Payload.MatrixID)
+	})
+
+	t.Run("a non-string stored matrix id falls back to the email", func(t *testing.T) {
+		settings := &couchdb.JSONDoc{M: map[string]interface{}{
+			"matrix_id": 42,
+			"email":     "al.ice@stg.lin-saas.com",
+		}}
+		req := buildRequest(inst, settings)
+		require.Equal(t, "@al.ice:stg.lin-saas.com", req.Payload.MatrixID)
+	})
+
+	t.Run("a malformed stored matrix id falls back to the email", func(t *testing.T) {
+		settings := &couchdb.JSONDoc{M: map[string]interface{}{
+			"matrix_id": "not-a-matrix-id",
+			"email":     "al.ice@stg.lin-saas.com",
+		}}
+		req := buildRequest(inst, settings)
+		require.Equal(t, "@al.ice:stg.lin-saas.com", req.Payload.MatrixID)
+	})
+}
+
+func TestIsMatrixID(t *testing.T) {
+	valid := []string{
+		"@alice:example.org",
+		"@al.ice:stg.example.org",
+		"@alice:example.org:8448",
+	}
+	for _, id := range valid {
+		require.True(t, IsMatrixID(id), id)
+	}
+
+	invalid := []string{
+		"",
+		"alice:example.org",          // no leading @
+		"@alice",                     // no server part
+		"@:example.org",              // empty localpart
+		"@alice:",                    // empty server
+		"alice@example.org",          // an email, not a matrix id
+		"@alice example:example.org", // inner whitespace
+		"@alice:example.org\n",       // trailing newline
+		"@" + strings.Repeat("a", 300) + ":example.org", // over the length cap
+	}
+	for _, id := range invalid {
+		require.False(t, IsMatrixID(id), id)
+	}
 }
 
 func TestUpdateCommonSettings_VersionMismatchReturnsTypedError(t *testing.T) {

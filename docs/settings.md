@@ -734,6 +734,15 @@ This attribute will only be present if a manager is associated with the
 instance and the instance was created on behalf of a partner with a defined
 legal notice.
 
+##### Note about `matrix_id`
+
+This attribute is only present when the `user.created` RabbitMQ message carried
+a `matrixId`. It is read-only: like `email`, it is restored from the stored
+document on `PUT /settings/instance`, so a client can neither change it nor
+erase it with a partial update. When it is absent, the Matrix ID sent to the
+common settings API is derived from the email local part and the instance
+domain.
+
 ### POST /settings/instance/deletion
 
 The settings application can use this route if the user wants to delete their

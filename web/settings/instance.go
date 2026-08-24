@@ -135,7 +135,9 @@ func (h *HTTPHandler) updateInstance(c echo.Context) error {
 		// replaced wholesale on patch, so the stored value is put back rather than
 		// the incoming one merely dropped; a read failure aborts the request
 		// instead of risking a wipe.
-		guarded := []string{"email", "pending_email"}
+		// matrix_id is guarded for the same reason: it is the account's Matrix
+		// identity downstream, so a client must not claim another one nor drop it.
+		guarded := []string{"email", "pending_email", "matrix_id"}
 		if inst.HasSignup() {
 			guarded = append(guarded, "phone", "recovery_email")
 		}

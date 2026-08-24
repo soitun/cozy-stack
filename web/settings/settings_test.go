@@ -1063,6 +1063,77 @@ func TestSettings(t *testing.T) {
 		attrs.HasValue("tz", "Pacific/Auckland")
 	})
 
+	t.Run("UpdateInstanceGuardsMatrixID", func(t *testing.T) {
+		// matrix_id is written by the user.created RabbitMQ handler and is sent
+		// to the common settings API as the account's Matrix identity, so a
+		// client can neither claim another one nor erase it with a partial
+		// update.
+		stored, err := testInstance.SettingsDocument()
+		require.NoError(t, err)
+		stored.M["matrix_id"] = "@alice:example.com"
+		require.NoError(t, couchdb.UpdateDoc(testInstance, stored))
+		t.Cleanup(func() {
+			doc, err := testInstance.SettingsDocument()
+			if err != nil {
+				return
+			}
+			delete(doc.M, "matrix_id")
+			_ = couchdb.UpdateDoc(testInstance, doc)
+		})
+
+		doc, err := testInstance.SettingsDocument()
+		require.NoError(t, err)
+		e := testutils.CreateTestClient(t, tsURL)
+		obj := e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithHeader("Accept", "application/vnd.api+json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(fmt.Sprintf(`{
+        "data": {
+          "type": "io.cozy.settings",
+          "id": "io.cozy.settings.instance",
+          "meta": {"rev": "%s"},
+          "attributes": {
+            "matrix_id": "@attacker:evil.example",
+            "tz": "Europe/Lisbon"
+          }
+        }
+      }`, doc.Rev()))).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+
+		attrs := obj.Value("data").Object().Value("attributes").Object()
+		attrs.HasValue("matrix_id", "@alice:example.com") // guarded: not changed
+		attrs.HasValue("tz", "Europe/Lisbon")
+
+		// A partial update that leaves matrix_id out must not erase it, since
+		// the settings doc is replaced wholesale on patch.
+		doc, err = testInstance.SettingsDocument()
+		require.NoError(t, err)
+		e.PUT("/settings/instance").
+			WithCookie(sessCookie, "connected").
+			WithHeader("Content-Type", "application/vnd.api+json").
+			WithHeader("Accept", "application/vnd.api+json").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte(fmt.Sprintf(`{
+        "data": {
+          "type": "io.cozy.settings",
+          "id": "io.cozy.settings.instance",
+          "meta": {"rev": "%s"},
+          "attributes": {
+            "tz": "Europe/Madrid"
+          }
+        }
+      }`, doc.Rev()))).
+			Expect().Status(200)
+
+		after, err := testInstance.SettingsDocument()
+		require.NoError(t, err)
+		assert.Equal(t, "@alice:example.com", after.M["matrix_id"])
+	})
+
 	t.Run("PostEmailBlockedWhenSignupEnabled", func(t *testing.T) {
 		// The dedicated email-change flow is also disabled on signup-managed
 		// contexts.
