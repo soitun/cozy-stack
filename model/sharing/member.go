@@ -47,6 +47,25 @@ const (
 	MemberStatusRevoked = "revoked"
 )
 
+// statusRank orders member statuses from the least to the most advanced, so
+// that merging a person present in several sharings keeps their most
+// advanced status deterministically.
+func statusRank(status string) int {
+	switch status {
+	case MemberStatusOwner:
+		return 5
+	case MemberStatusReady:
+		return 4
+	case MemberStatusSeen:
+		return 3
+	case MemberStatusPendingInvitation:
+		return 2
+	case MemberStatusMailNotSent:
+		return 1
+	}
+	return 0
+}
+
 const maximalNumberOfMembers = 90
 
 func maxNumberOfMembers(inst *instance.Instance) int {

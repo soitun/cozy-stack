@@ -1167,6 +1167,7 @@ func Routes(router *echo.Group) {
 	// Misc
 	router.GET("/news", CountNewShortcuts)
 	router.GET("/doctype/:doctype", GetSharingsInfoByDocType)
+	router.GET("/recipients/:file-id", GetEffectiveRecipients)
 	router.GET("/:sharing-id/recipients/:index/avatar", GetAvatar)
 
 	// Register the URL of their Cozy for recipients

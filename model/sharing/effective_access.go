@@ -3,6 +3,7 @@ package sharing
 import (
 	"os"
 	"path"
+	"sort"
 
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/permission"
@@ -82,101 +83,20 @@ func (r *AccessResolver) Resolve(targetID string) (*EffectiveAccess, error) {
 	return ea, nil
 }
 
+// rootInfo describes a shared root applying to a target: the directory (or
+// file) that is the root of a sharing scope.
+type rootInfo struct {
+	RootID   string
+	RootPath string
+	RootName string
+}
+
 // scopesFor loads the target, builds ancestor paths, finds shared roots on
 // the path, adds the target's own file share if any, bulk-loads sharings,
 // filters to active additive ones where the current instance is a member,
 // and returns the resulting scopes.
 func (r *AccessResolver) scopesFor(targetID string) ([]SharingScope, error) {
-	fs := r.inst.VFS()
-
-	dir, file, err := fs.DirOrFileByID(targetID)
-	if err != nil {
-		return nil, err
-	}
-	if dir == nil && file == nil {
-		return nil, os.ErrNotExist
-	}
-
-	var targetPath string
-	if dir != nil {
-		targetPath = dir.Fullpath
-	} else {
-		targetPath, err = file.Path(fs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	ancestorPaths := r.ancestorPaths(targetPath, dir != nil)
-
-	// XXX: single find via dir-by-path + Go-side referenced_by filter, rather
-	// than a dedicated shared-folder-roots-by-path view — one fewer view to
-	// maintain while N ancestors is small.
-	paths := make([]any, len(ancestorPaths))
-	for i, p := range ancestorPaths {
-		paths[i] = p
-	}
-	type sharedRootDoc struct {
-		ID           string                 `json:"_id"`
-		Path         string                 `json:"path"`
-		ReferencedBy []couchdb.DocReference `json:"referenced_by"`
-	}
-	var roots []sharedRootDoc
-	if len(paths) > 0 {
-		req := &couchdb.FindRequest{
-			UseIndex: "dir-by-path",
-			Selector: mango.And(
-				mango.In("path", paths),
-				mango.Equal("type", consts.DirType),
-				mango.Exists(couchdb.SelectorReferencedBy),
-			),
-			Fields: []string{"_id", "path", "referenced_by"},
-			Limit:  len(paths),
-		}
-		if err := couchdb.FindDocs(r.inst, consts.Files, req, &roots); err != nil {
-			return nil, err
-		}
-	}
-
-	// Collect (sharingID -> {rootID, rootPath}) from ancestor dir roots.
-	type rootInfo struct {
-		RootID   string
-		RootPath string
-	}
-	rootBySharing := make(map[string]rootInfo)
-	for _, root := range roots {
-		for _, ref := range root.ReferencedBy {
-			if ref.Type == consts.Sharings {
-				if _, ok := rootBySharing[ref.ID]; !ok {
-					rootBySharing[ref.ID] = rootInfo{RootID: root.ID, RootPath: root.Path}
-				}
-			}
-		}
-	}
-
-	// XXX: DirType selector excludes the file from the Mango find; its
-	// own scopes are added by hand so file shares stay additive at the target
-	// level.
-	if file != nil {
-		for _, ref := range file.ReferencedBy {
-			if ref.Type == consts.Sharings {
-				if _, ok := rootBySharing[ref.ID]; !ok {
-					rootBySharing[ref.ID] = rootInfo{RootID: file.DocID, RootPath: targetPath}
-				}
-			}
-		}
-	}
-
-	if len(rootBySharing) == 0 {
-		return nil, nil
-	}
-
-	sharingIDs := make([]string, 0, len(rootBySharing))
-	for id := range rootBySharing {
-		sharingIDs = append(sharingIDs, id)
-	}
-
-	sharings, err := r.loadSharings(sharingIDs)
+	sharings, rootBySharing, err := r.applicableSharings(targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +120,107 @@ func (r *AccessResolver) scopesFor(targetID string) ([]SharingScope, error) {
 		})
 	}
 	return scopes, nil
+}
+
+// applicableSharings resolves the active additive sharings applying to the
+// target: its own share (if it is a shared file) plus the shares of every
+// ancestor directory, without any membership filtering. It also returns the
+// root info of each sharing, keyed by sharing ID.
+func (r *AccessResolver) applicableSharings(targetID string) ([]*Sharing, map[string]rootInfo, error) {
+	fs := r.inst.VFS()
+
+	dir, file, err := fs.DirOrFileByID(targetID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if dir == nil && file == nil {
+		return nil, nil, os.ErrNotExist
+	}
+
+	var targetPath string
+	if dir != nil {
+		targetPath = dir.Fullpath
+	} else {
+		targetPath, err = file.Path(fs)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	ancestorPaths := r.ancestorPaths(targetPath, dir != nil)
+
+	// XXX: single find via dir-by-path + Go-side referenced_by filter, rather
+	// than a dedicated shared-folder-roots-by-path view — one fewer view to
+	// maintain while N ancestors is small.
+	paths := make([]any, len(ancestorPaths))
+	for i, p := range ancestorPaths {
+		paths[i] = p
+	}
+	type sharedRootDoc struct {
+		ID           string                 `json:"_id"`
+		Path         string                 `json:"path"`
+		Name         string                 `json:"name"`
+		ReferencedBy []couchdb.DocReference `json:"referenced_by"`
+	}
+	var roots []sharedRootDoc
+	if len(paths) > 0 {
+		req := &couchdb.FindRequest{
+			UseIndex: "dir-by-path",
+			Selector: mango.And(
+				mango.In("path", paths),
+				mango.Equal("type", consts.DirType),
+				mango.Exists(couchdb.SelectorReferencedBy),
+			),
+			Fields: []string{"_id", "path", "name", "referenced_by"},
+			Limit:  len(paths),
+		}
+		if err := couchdb.FindDocs(r.inst, consts.Files, req, &roots); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Collect (sharingID -> rootInfo) from ancestor dir roots.
+	rootBySharing := make(map[string]rootInfo)
+	for _, root := range roots {
+		for _, ref := range root.ReferencedBy {
+			if ref.Type == consts.Sharings {
+				if _, ok := rootBySharing[ref.ID]; !ok {
+					rootBySharing[ref.ID] = rootInfo{RootID: root.ID, RootPath: root.Path, RootName: root.Name}
+				}
+			}
+		}
+	}
+
+	// XXX: DirType selector excludes the file from the Mango find; its
+	// own scopes are added by hand so file shares stay additive at the target
+	// level.
+	if file != nil {
+		for _, ref := range file.ReferencedBy {
+			if ref.Type == consts.Sharings {
+				if _, ok := rootBySharing[ref.ID]; !ok {
+					rootBySharing[ref.ID] = rootInfo{RootID: file.DocID, RootPath: targetPath, RootName: file.DocName}
+				}
+			}
+		}
+	}
+
+	if len(rootBySharing) == 0 {
+		return nil, nil, nil
+	}
+
+	sharingIDs := make([]string, 0, len(rootBySharing))
+	for id := range rootBySharing {
+		sharingIDs = append(sharingIDs, id)
+	}
+	// Stable order: the recipient list derived from these sharings must not
+	// change between identical calls.
+	sort.Strings(sharingIDs)
+
+	sharings, err := r.loadSharings(sharingIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sharings, rootBySharing, nil
 }
 
 // ancestorPaths returns the directory paths to query for shared roots. When

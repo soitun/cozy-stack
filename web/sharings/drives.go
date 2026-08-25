@@ -1356,6 +1356,7 @@ func drivesRoutes(router *echo.Group) {
 
 	drive.POST("/notes", proxy(CreateNote, true))
 	drive.GET("/notes/:file-id/open", OpenNoteURL)
+	drive.GET("/recipients/:file-id", proxy(GetDriveEffectiveRecipients, true))
 	drive.GET("/office/:file-id/open", OpenOffice)
 	drive.GET("/editor/:file-id/open", OpenEditor)
 
