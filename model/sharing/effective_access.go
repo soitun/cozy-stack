@@ -14,14 +14,15 @@ import (
 
 // SharingScope describes a single sharing scope that applies to a target file
 // or folder. It is produced by AccessResolver.scopesMatching and consumed by
-// resolve to aggregate an EffectiveAccess. ReadOnly reflects the matched
-// member's flag for that scope.
+// resolve to aggregate an EffectiveAccess. Sharing is the backing sharing
+// document and Member the matching member's entry inside it (the same object
+// as Sharing.Members[i]): the pair is coherent by construction.
 type SharingScope struct {
-	SharingID  string
+	Sharing    *Sharing
+	Member     *Member
 	RootID     string
 	RootPath   string
 	AccessMode string
-	ReadOnly   bool
 }
 
 // EffectiveAccess is the merged result of all applicable additive sharing
@@ -90,9 +91,9 @@ func (r *AccessResolver) resolve(targetID string, memberOf func(*Sharing) *Membe
 	}
 	ea := &EffectiveAccess{SourceSharingIDs: make([]string, 0, len(scopes))}
 	for _, sc := range scopes {
-		ea.SourceSharingIDs = append(ea.SourceSharingIDs, sc.SharingID)
+		ea.SourceSharingIDs = append(ea.SourceSharingIDs, sc.Sharing.SID)
 		ea.CanRead = true
-		if !sc.ReadOnly {
+		if !sc.Member.ReadOnly {
 			ea.CanWrite = true
 		}
 	}
@@ -128,11 +129,11 @@ func (r *AccessResolver) scopesMatching(targetID string, memberOf func(*Sharing)
 			continue
 		}
 		scopes = append(scopes, SharingScope{
-			SharingID:  s.SID,
+			Sharing:    s,
+			Member:     member,
 			RootID:     info.RootID,
 			RootPath:   info.RootPath,
 			AccessMode: s.EffectiveAccessMode(),
-			ReadOnly:   member.ReadOnly,
 		})
 	}
 	return scopes, nil
@@ -287,6 +288,33 @@ func (r *AccessResolver) loadSharings(ids []string) ([]*Sharing, error) {
 		kept = append(kept, s)
 	}
 	return kept, nil
+}
+
+// NearestWritableSharing returns the sharing scope granting write access to
+// the member that is nearest to the target: the shared root enclosing the
+// target with the deepest path. Every applicable scope covers the target by
+// construction, so the nearest one is the narrowest: a sharecode minted from
+// it (see FileOpener.GetSharecode) lets the member act on the target without
+// granting anything beyond their effective write scope. Returns nil when no
+// applicable scope grants the member write.
+func (r *AccessResolver) NearestWritableSharing(targetID string, member *Member) (*SharingScope, error) {
+	scopes, err := r.scopesMatching(targetID, func(s *Sharing) *Member {
+		return s.MemberMatching(member)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var nearest *SharingScope
+	for i := range scopes {
+		sc := &scopes[i]
+		if sc.Member.ReadOnly {
+			continue
+		}
+		if nearest == nil || len(sc.RootPath) > len(nearest.RootPath) {
+			nearest = sc
+		}
+	}
+	return nearest, nil
 }
 
 // NearestRestrictiveBoundary returns the closest limited_access boundary

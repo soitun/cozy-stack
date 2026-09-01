@@ -287,6 +287,24 @@ func checkDriveMemberRead(c echo.Context, inst *instance.Instance, targetID stri
 	return err
 }
 
+// driveOpenReadOnly says whether an open route (note, office, editor) must be
+// forced read-only for the calling drive member: the interact token carries
+// ALL verbs, so the member's read-only restriction is enforced at the
+// application layer. It also requires effective read on the target. Returns
+// false for non-member tokens (owner, share-by-link): the VFS check in the
+// open handlers governs them.
+func driveOpenReadOnly(c echo.Context, inst *instance.Instance, fileID string) (bool, error) {
+	member := GetSharedDriveMember(c)
+	if member == nil {
+		return false, nil
+	}
+	ea, err := authorizeDriveTarget(inst, member, fileID)
+	if err != nil {
+		return false, err
+	}
+	return !ea.Can(permission.PUT), nil
+}
+
 // ReadMetadataFromPath allows to get file/dir information for a path.
 func ReadMetadataFromPath(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
 	// Drive tokens are checked against the member's effective read access on
@@ -713,107 +731,39 @@ func GetShortcut(c echo.Context, inst *instance.Instance, s *sharing.Sharing) er
 }
 
 // OpenNoteURL returns the parameters to open a note inside a shared drive.
-func OpenNoteURL(c echo.Context) error {
-	inst := middlewares.GetInstance(c)
-	s, err := sharing.FindSharing(inst, c.Param("id"))
+// The recipient is proxied to the owner by proxy(); this handler only runs
+// on the owner.
+func OpenNoteURL(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
+	forced, err := driveOpenReadOnly(c, inst, c.Param("file-id"))
 	if err != nil {
-		return wrapErrors(err)
-	}
-	if !s.Drive {
-		return jsonapi.NotFound(errors.New("not a drive"))
-	}
-	if s.Owner {
-		return notes.OpenNoteURL(c)
-	}
-
-	if err := middlewares.AllowWholeType(c, permission.GET, consts.Files); err != nil {
 		return err
 	}
-
-	fileID := c.Param("file-id")
-	fileOpener := &sharing.FileOpener{
-		Inst:    inst,
-		Sharing: s,
-		File:    &vfs.FileDoc{DocID: fileID},
-	}
-	open := &sharing.NoteOpener{FileOpener: fileOpener}
-
-	doc, err := open.GetResult(-1, false)
-	if err != nil {
-		return wrapErrors(err)
-	}
-
-	return jsonapi.Data(c, http.StatusOK, doc, nil)
+	readOnly := forced || c.QueryParam("ReadOnly") == "true"
+	return notes.OpenNoteURLWithReadOnly(c, readOnly)
 }
 
 // OpenOffice returns the parameter to open an office document inside a shared
-// drive.
-func OpenOffice(c echo.Context) error {
-	inst := middlewares.GetInstance(c)
-	s, err := sharing.FindSharing(inst, c.Param("id"))
+// drive. The recipient is proxied to the owner by proxy(); this handler only
+// runs on the owner.
+func OpenOffice(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
+	forced, err := driveOpenReadOnly(c, inst, c.Param("file-id"))
 	if err != nil {
-		return wrapErrors(err)
-	}
-	if !s.Drive {
-		return jsonapi.NotFound(errors.New("not a drive"))
-	}
-	if s.Owner {
-		return office.Open(c)
-	}
-
-	if err := middlewares.AllowWholeType(c, permission.GET, consts.Files); err != nil {
 		return err
 	}
-
-	fileID := c.Param("file-id")
-	fileOpener := &sharing.FileOpener{
-		Inst:    inst,
-		Sharing: s,
-		File:    &vfs.FileDoc{DocID: fileID},
-	}
-	open := &sharing.OfficeOpener{FileOpener: fileOpener}
-
-	doc, err := open.GetResult(-1, false)
-	if err != nil {
-		return wrapErrors(err)
-	}
-
-	return jsonapi.Data(c, http.StatusOK, doc, nil)
+	readOnly := forced || c.QueryParam("ReadOnly") == "true"
+	return office.OpenWithReadOnly(c, readOnly)
 }
 
 // OpenEditor returns the parameters to open a file with an editor inside a
-// shared drive.
-func OpenEditor(c echo.Context) error {
-	inst := middlewares.GetInstance(c)
-	s, err := sharing.FindSharing(inst, c.Param("id"))
+// shared drive. The recipient is proxied to the owner by proxy(); this
+// handler only runs on the owner.
+func OpenEditor(c echo.Context, inst *instance.Instance, s *sharing.Sharing) error {
+	forced, err := driveOpenReadOnly(c, inst, c.Param("file-id"))
 	if err != nil {
-		return wrapErrors(err)
-	}
-	if !s.Drive {
-		return jsonapi.NotFound(errors.New("not a drive"))
-	}
-	if s.Owner {
-		return editor.OpenURL(c)
-	}
-
-	if err := middlewares.AllowWholeType(c, permission.GET, consts.Files); err != nil {
 		return err
 	}
-
-	fileID := c.Param("file-id")
-	fileOpener := &sharing.FileOpener{
-		Inst:    inst,
-		Sharing: s,
-		File:    &vfs.FileDoc{DocID: fileID},
-	}
-	open := &sharing.EditorOpener{FileOpener: fileOpener}
-
-	doc, err := open.GetResult(-1, false)
-	if err != nil {
-		return wrapErrors(err)
-	}
-
-	return jsonapi.Data(c, http.StatusOK, doc, nil)
+	readOnly := forced || c.QueryParam("ReadOnly") == "true"
+	return editor.OpenURLWithReadOnly(c, readOnly)
 }
 
 // CreateSharedDriveShareByLinkHandler creates a share-by-link permission for a file in a shared drive.
@@ -1518,10 +1468,10 @@ func drivesRoutes(router *echo.Group) {
 	drive.DELETE("/:file-id", proxy(TrashHandler, true))
 
 	drive.POST("/notes", proxy(CreateNote, true))
-	drive.GET("/notes/:file-id/open", OpenNoteURL)
+	drive.GET("/notes/:file-id/open", proxy(OpenNoteURL, true))
 	drive.GET("/recipients/:file-id", proxy(GetDriveEffectiveRecipients, true))
-	drive.GET("/office/:file-id/open", OpenOffice)
-	drive.GET("/editor/:file-id/open", OpenEditor)
+	drive.GET("/office/:file-id/open", proxy(OpenOffice, true))
+	drive.GET("/editor/:file-id/open", proxy(OpenEditor, true))
 
 	drive.GET("/shortcuts/:file-id", proxy(GetShortcut, true))
 
@@ -1689,6 +1639,12 @@ func guardSharedDriveRouteForMember(c echo.Context, inst *instance.Instance, s *
 	// registered route pattern, not the raw URL, so a future route whose
 	// path contains "/permissions" cannot silently bypass this guard.
 	if strings.HasPrefix(c.Path(), "/sharings/drives/:id/permissions") {
+		return nil
+	}
+	// Open routes (note, office, editor) are checked in the handler by
+	// driveOpenReadOnly: the guard's 403 would leak the existence of a
+	// target outside every scope, where the handler answers 404.
+	if strings.HasSuffix(c.Path(), "/open") {
 		return nil
 	}
 	// Trashed files are outside every sharing scope: the effective access

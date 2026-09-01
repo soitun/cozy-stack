@@ -358,6 +358,21 @@ member:
   write on the destination folder;
 - `POST /sharings/drives/:id/:file-id/copy` requires effective read on the
   source file and effective write on the destination folder;
+- open routes (`GET /sharings/drives/:id/notes/:file-id/open`, `GET
+  /sharings/drives/:id/office/:file-id/open`, `GET
+  /sharings/drives/:id/editor/:file-id/open`) require effective read on the
+  target file. The opening is **forced read-only** when the member lacks
+  effective write on the target: the share-interact token carries ALL verbs
+  (including write), so the read-only restriction is enforced at the
+  application layer by rewriting the `ReadOnly` query parameter to `true`
+  before delegating to the note/office/editor handler. A member with
+  effective write access opens the file in read-write mode (unless they
+  explicitly pass `ReadOnly=true`); in that case the returned sharecode is
+  minted from the nearest sharing scope that grants the effective write (e.g.
+  a nested drive), never from the drive whose route was called when that
+  drive only grants read: the share-interact permission set covers the whole
+  drive, and a code scoped beyond the member's effective write would let them
+  write files they cannot write;
 - trash routes (`POST`/`DELETE /sharings/drives/:id/trash/:file-id`) target
   files outside every sharing scope: restore and destroy require effective
   write on the folder the file would be restored to (or on its first
@@ -1121,12 +1136,16 @@ drives return `422 Unprocessable Entity`.
 Return the parameters to build the URL where the note can be opened.
 Identical to [`GET /notes/:file-id/open`](notes.md#get-notesidopen).
 
+Drive tokens (share-interact) are checked against the member's effective read access on the target; a target outside every sharing scope of the caller is answered `404 Not Found`. The opening is forced read-only (the sharecode resolves to a `share-preview` permission) when the member lacks effective write access on the target. Otherwise the sharecode is minted from the nearest sharing scope that grants the effective write.
+
 ## Office
 
 ### GET /sharings/drives/:id/office/:file-id/open
 
 Returns the parameters to open an office document. Identical to
 [`GET /office/:file-id/open`](office.md#get-officeidopen).
+
+Drive tokens are checked and the opening forced read-only the same way as the notes open route.
 
 ## Editors
 
@@ -1136,9 +1155,7 @@ Return the parameters to open a file from a shared drive with an editor.
 Identical to [`GET /editor/:file-id/open`](files.md#get-editorfile-idopen), but
 scoped to the shared drive.
 
-Recipients are resolved through the shared-drive owner instance, so the returned
-`instance`, `file_id`, and `sharecode` are the values to use for opening the
-file on that owner instance.
+Drive tokens are checked and the opening forced read-only the same way as the notes open route.
 
 ## Shortcuts
 

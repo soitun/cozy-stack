@@ -28,6 +28,12 @@ type FileOpener struct {
 	Code      string
 	ClientID  string
 	MemberKey string
+
+	// InteractToken marks a share-interact token on a drive: MemberKey
+	// identifies the member, but readOnly is decided by the caller
+	// (effective access) and member.ReadOnly must not force it — a member
+	// read-only on the drive can have effective write on a nested folder.
+	InteractToken bool
 }
 
 // NewFileOpener returns a FileOpener for the given file on the current instance.
@@ -124,6 +130,13 @@ func (o *FileOpener) CheckPermission(pdoc *permission.Permission, sharingID stri
 		}
 	}
 
+	// A share-interact token on a drive identifies the member via MemberKey
+	// (set above from the interact codes); flag it so GetSharecode does not
+	// apply member.ReadOnly: readOnly comes from the caller.
+	if pdoc.Type == permission.TypeShareInteract && o.Sharing != nil && o.Sharing.Drive {
+		o.InteractToken = true
+	}
+
 	// If a file is opened via a token for cozy-to-cozy sharing, then the file
 	// must be in this sharing, or the stack should refuse to open the file.
 	if sharingID != "" && o.Sharing != nil && o.Sharing.ID() == sharingID {
@@ -155,7 +168,9 @@ func (o *FileOpener) ShouldOpenLocally() bool {
 }
 
 // GetSharecode returns a sharecode that can be used to open the note with the
-// permissions of the member.
+// permissions of the member. If the caller already decided the read-only
+// mode (via the open handler's effective access check), it is respected and
+// not recalculated; it must previously be set by the caller via ReadOnly.
 func (o *FileOpener) GetSharecode(memberIndex int, readOnly bool) (string, error) {
 	s := o.Sharing
 	if s == nil || (!s.Drive && o.ClientID == "" && o.MemberKey == "") {
@@ -165,19 +180,25 @@ func (o *FileOpener) GetSharecode(memberIndex int, readOnly bool) (string, error
 	var member *Member
 	var err error
 	if o.MemberKey != "" {
-		// Preview of a cozy-to-cozy sharing
+		// Preview of cozy-to-cozy sharing, or share-interact token on a
+		// drive; MemberKey is email or instance, and its lookup finds the
+		// member. memberIndex is reset to the member's position, needed for
+		// getPreviewCode member-index matching.
 		for i, m := range s.Members {
 			if m.Instance == o.MemberKey || m.Email == o.MemberKey {
 				member = &s.Members[i]
+				memberIndex = i
 			}
 		}
 		if member == nil {
 			return "", ErrMemberNotFound
 		}
-		if member.ReadOnly {
-			readOnly = true
-		} else {
-			readOnly = s.ReadOnlyRules()
+		if !o.InteractToken {
+			if member.ReadOnly {
+				readOnly = true
+			} else {
+				readOnly = s.ReadOnlyRules()
+			}
 		}
 	} else if s.Owner {
 		member, err = s.FindMemberByInboundClientID(o.ClientID)
@@ -199,6 +220,21 @@ func (o *FileOpener) GetSharecode(memberIndex int, readOnly bool) (string, error
 
 	if readOnly {
 		return o.getPreviewCode(member, memberIndex)
+	}
+	// A drive member's effective write on the file may come from another
+	// sharing than the token's drive (e.g. a nested drive): mint the code
+	// from the nearest sharing scope that grants the write, else the token's
+	// sharing code would grant write access on the whole drive, outside the
+	// member's effective scope.
+	if o.InteractToken {
+		// ponytail: the web layer already resolved the effective access to
+		// decide readOnly; caching it across the layers would mean plumbing
+		// the result through the notes/office/editor handlers.
+		if sc, err := NewAccessResolver(o.Inst).NearestWritableSharing(o.File.ID(), member); err == nil && sc != nil {
+			o.Sharing = sc.Sharing
+			member = sc.Member
+			memberIndex = -1 // the code is keyed by the member email or instance
+		}
 	}
 	return o.Sharing.GetInteractCode(o.Inst, member, memberIndex)
 }

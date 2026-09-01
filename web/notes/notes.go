@@ -321,6 +321,12 @@ func ForceNoteSync(c echo.Context) error {
 // OpenNoteURL is the API handler for GET /notes/:id/open. It returns the
 // parameters to build the URL where the note can be opened.
 func OpenNoteURL(c echo.Context) error {
+	return OpenNoteURLWithReadOnly(c, c.QueryParam("ReadOnly") == "true")
+}
+
+// OpenNoteURLWithReadOnly is like OpenNoteURL, with the read-only flag given
+// explicitly instead of read from the query.
+func OpenNoteURLWithReadOnly(c echo.Context, readOnly bool) error {
 	inst := middlewares.GetInstance(c)
 	fileID := c.Param("file-id")
 	open, err := sharing.OpenNote(inst, fileID)
@@ -333,7 +339,6 @@ func OpenNoteURL(c echo.Context) error {
 		return err
 	}
 	memberIndex, _ := strconv.Atoi(c.QueryParam("MemberIndex"))
-	readOnly := c.QueryParam("ReadOnly") == "true"
 
 	// If a directory is shared by link and contains a note, the note can be
 	// opened with the same sharecode as the directory. The sharecode is also

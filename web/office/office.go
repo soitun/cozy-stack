@@ -19,6 +19,12 @@ import (
 
 // Open returns the parameters to open an office document.
 func Open(c echo.Context) error {
+	return OpenWithReadOnly(c, c.QueryParam("ReadOnly") == "true")
+}
+
+// OpenWithReadOnly is like Open, with the read-only flag given explicitly
+// instead of read from the query.
+func OpenWithReadOnly(c echo.Context, readOnly bool) error {
 	inst := middlewares.GetInstance(c)
 	fileID := c.Param("file-id")
 	open, err := sharing.OpenOffice(inst, fileID)
@@ -30,7 +36,6 @@ func Open(c echo.Context) error {
 		return err
 	}
 	memberIndex, _ := strconv.Atoi(c.QueryParam("MemberIndex"))
-	readOnly := c.QueryParam("ReadOnly") == "true"
 
 	// If a directory is shared by link and contains an office document, the
 	// document can be opened with the same sharecode as the directory. The

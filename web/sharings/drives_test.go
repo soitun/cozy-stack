@@ -4905,6 +4905,17 @@ func TestSharedDriveNotes(t *testing.T) {
 		}
 	})
 
+	t.Run("OpenNoteWithUnknownIDFromSharedDrive", func(t *testing.T) {
+		_, eB, _ := env.createClients(t)
+
+		// The member token carries ALL verbs, so the guard is what rejects
+		// the unknown target: effective-access resolution hits os.ErrNotExist
+		// and must answer 404, not a wrapped internal error.
+		eB.GET("/sharings/drives/"+env.firstSharingID+"/notes/unknown-note-id/open").
+			WithHeader("Authorization", "Bearer "+env.bettyToken).
+			Expect().Status(http.StatusNotFound)
+	})
+
 	t.Run("OpenFileWithEditorFromSharedDrive", func(t *testing.T) {
 		eA, eB, _ := env.createClients(t)
 
@@ -6285,5 +6296,187 @@ func TestSharedDriveDownloadLinksEffectiveAccess(t *testing.T) {
 			WithQuery("Id", outsideFileID).
 			WithHeader("Authorization", "Bearer "+env.acmeToken).
 			Expect().Status(200)
+	})
+}
+
+func TestSharedDriveOpenRoutesEffectiveAccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	env := setupSharedDrivesEnv(t)
+	eA, _, eD := env.createClients(t)
+
+	// D1: Dave is a read-only member of the whole drive.
+	d1ID, d1RootID, _ := createSharedDrive(t, DriveCreationMethodFromFolder,
+		env.acme, env.acmeToken, env.tsA.URL, "Open D1", "d1",
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: true}})
+
+	// A note inside the drive, created by the owner.
+	noteObj := eA.POST("/sharings/drives/"+d1ID+"/notes").
+		WithHeader("Authorization", "Bearer "+env.acmeToken).
+		WithHeader("Content-Type", "application/json").
+		WithBytes([]byte(`{
+			"data": {
+				"type": "io.cozy.notes.documents",
+				"attributes": {
+					"title": "Drive Note",
+					"dir_id": "` + d1RootID + `",
+					"schema": {
+						"nodes": [
+							["doc", { "content": "block+" }],
+							["paragraph", { "content": "inline*", "group": "block" }],
+							["text", { "group": "inline" }]
+						],
+						"marks": [],
+						"topNode": "doc"
+					}
+				}
+			}
+		}`)).
+		Expect().Status(201).
+		JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+		Object()
+	noteID := noteObj.Value("data").Object().Value("id").String().Raw()
+
+	// A file outside every drive: Dave has no effective access to it.
+	outsideDirID := createRootDirectory(t, eA, "OutsideOpen", env.acmeToken)
+	outsideFileID := createFile(t, eA, outsideDirID, "outside.txt", env.acmeToken)
+
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d1ID)
+
+	t.Run("OpenNoteInScopeAllowed", func(t *testing.T) {
+		obj := eD.GET("/sharings/drives/"+d1ID+"/notes/"+noteID+"/open").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+		attrs := obj.Path("$.data.attributes").Object()
+
+		// The file must be opened on the owner's instance, not the recipient's.
+		attrs.Value("instance").String().IsEqual(env.acme.Domain)
+
+		// Dave is read-only on the whole drive: the opening must have been
+		// forced read-only, i.e. the returned sharecode must resolve to a
+		// share-preview permission (read-only), not a share-interact one.
+		sharecode := attrs.Value("sharecode").String().NotEmpty().Raw()
+		permObj := eA.GET("/permissions/self").
+			WithHeader("Authorization", "Bearer "+sharecode).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+		permObj.Path("$.data.attributes.type").String().IsEqual("share-preview")
+	})
+
+	t.Run("OpenNoteOutOfScopeNotFound", func(t *testing.T) {
+		eD.GET("/sharings/drives/"+d1ID+"/notes/"+outsideFileID+"/open").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(404)
+	})
+
+	t.Run("OpenOfficeOutOfScopeNotFound", func(t *testing.T) {
+		eD.GET("/sharings/drives/"+d1ID+"/office/"+outsideFileID+"/open").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(404)
+	})
+
+	t.Run("OpenEditorOutOfScopeNotFound", func(t *testing.T) {
+		eD.GET("/sharings/drives/"+d1ID+"/editor/"+outsideFileID+"/open").
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(404)
+	})
+
+	t.Run("OwnerTokenUnrestricted", func(t *testing.T) {
+		eA.GET("/sharings/drives/"+d1ID+"/notes/"+noteID+"/open").
+			WithHeader("Authorization", "Bearer "+env.acmeToken).
+			Expect().Status(200)
+	})
+}
+
+func TestSharedDriveOpenReadWriteByRecipient(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	env := setupSharedDrivesEnv(t)
+	eA, _, eD := env.createClients(t)
+
+	// D1: Dave is a read-only member of the whole drive.
+	d1ID, d1RootID, _ := createSharedDrive(t, DriveCreationMethodFromFolder,
+		env.acme, env.acmeToken, env.tsA.URL, "RW Open D1", "d1",
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: true}})
+
+	// D2: Dave has write access on the nested Writable folder.
+	writableDirID := createDirectory(t, eA, d1RootID, "Writable", env.acmeToken)
+	d2ID := createDriveOnFolder(t, eA, env.acme, writableDirID, env.acmeToken,
+		[]RecipientInfo{{Name: "Dave", Email: "dave@example.net", ReadOnly: false}})
+
+	// The owner creates one note in the writable folder and one at the drive
+	// root.
+	noteSchema := `{
+		"nodes": [
+			["doc", { "content": "block+" }],
+			["paragraph", { "content": "inline*", "group": "block" }],
+			["text", { "group": "inline" }]
+		],
+		"marks": [],
+		"topNode": "doc"
+	}`
+	createNote := func(dirID, title string) string {
+		return eA.POST("/sharings/drives/"+d1ID+"/notes").
+			WithHeader("Authorization", "Bearer "+env.acmeToken).
+			WithHeader("Content-Type", "application/json").
+			WithBytes([]byte(`{
+				"data": {
+					"type": "io.cozy.notes.documents",
+					"attributes": {
+						"title": "` + title + `",
+						"dir_id": "` + dirID + `",
+						"schema": ` + noteSchema + `
+					}
+				}
+			}`)).
+			Expect().Status(201).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object().Path("$.data.id").String().NotEmpty().Raw()
+	}
+	noteInWritableID := createNote(writableDirID, "Writable Note")
+
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d1ID)
+	acceptSharedDrive(t, env.acme, env.dave, "Dave", env.tsA.URL, env.tsD.URL, d2ID)
+
+	sharecodeType := func(path string, readOnlyQuery bool) string {
+		req := eD.GET(path)
+		if readOnlyQuery {
+			req = req.WithQuery("ReadOnly", "true")
+		}
+		obj := req.
+			WithHeader("Authorization", "Bearer "+env.daveToken).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+		attrs := obj.Path("$.data.attributes").Object()
+		attrs.Value("instance").String().IsEqual(env.acme.Domain)
+		sharecode := attrs.Value("sharecode").String().NotEmpty().Raw()
+		permObj := eA.GET("/permissions/self").
+			WithHeader("Authorization", "Bearer "+sharecode).
+			Expect().Status(200).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object()
+		return permObj.Path("$.data.attributes.type").String().Raw()
+	}
+
+	t.Run("OpenNoteInWritableFolderReadWrite", func(t *testing.T) {
+		codeType := sharecodeType("/sharings/drives/"+d1ID+"/notes/"+noteInWritableID+"/open", false)
+		if codeType != "share-interact" {
+			t.Errorf("expected share-interact sharecode, got %s", codeType)
+		}
+	})
+
+	t.Run("ExplicitReadOnlyRespected", func(t *testing.T) {
+		codeType := sharecodeType("/sharings/drives/"+d1ID+"/notes/"+noteInWritableID+"/open", true)
+		if codeType != "share-preview" {
+			t.Errorf("expected share-preview sharecode, got %s", codeType)
+		}
 	})
 }
