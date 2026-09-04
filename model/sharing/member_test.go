@@ -581,3 +581,28 @@ func TestMemberFor(t *testing.T) {
 		assert.Nil(t, s.MemberFor(inst))
 	})
 }
+
+func TestMemberMatching(t *testing.T) {
+	s := &Sharing{Members: []Member{
+		{Status: MemberStatusOwner, Name: "Alice", Email: "alice@example.net", Instance: "https://alice.example.net"},
+		{Status: MemberStatusReady, Name: "Dave", Email: "dave@example.net", Instance: "https://dave.example.net"},
+		{Status: MemberStatusRevoked, Name: "Eve", Email: "eve@example.net", Instance: "https://eve.example.net"},
+		{Status: MemberStatusSeen, Name: "Frank", Email: "frank@example.net", Instance: "https://frank.example.net"},
+	}}
+
+	byEmail := s.MemberMatching(&Member{Email: "dave@example.net"})
+	require.NotNil(t, byEmail)
+	assert.Equal(t, "Dave", byEmail.Name)
+
+	byInstance := s.MemberMatching(&Member{Instance: "https://dave.example.net"})
+	require.NotNil(t, byInstance)
+	assert.Equal(t, "dave@example.net", byInstance.Email)
+
+	assert.Nil(t, s.MemberMatching(&Member{Email: "eve@example.net"}), "revoked members must not match")
+	assert.Nil(t, s.MemberMatching(&Member{Email: "frank@example.net"}), "members who have not accepted the sharing must not match")
+	assert.Nil(t, s.MemberMatching(&Member{Email: "alice@example.net"}), "the owner entry must not match")
+	assert.Nil(t, s.MemberMatching(&Member{Instance: "https://alice.example.net"}), "the owner entry must not match")
+	assert.Nil(t, s.MemberMatching(&Member{Email: "stranger@example.net"}))
+	assert.Nil(t, s.MemberMatching(nil))
+	assert.Nil(t, s.MemberMatching(&Member{}))
+}

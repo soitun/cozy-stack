@@ -33,10 +33,12 @@ func TestAccessResolver_AncestorsOnly(t *testing.T) {
 	s := createActiveDirSharing(t, inst, parent.ID())
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(child.ID())
+	scopes, err := resolver.scopesMatching(child.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	require.Len(t, scopes, 1)
-	assert.Equal(t, s.SID, scopes[0].SharingID)
+	assert.Equal(t, s.SID, scopes[0].Sharing.SID)
 	assert.Equal(t, parent.ID(), scopes[0].RootID)
 	assert.Equal(t, parent.Fullpath, scopes[0].RootPath)
 
@@ -67,12 +69,14 @@ func TestAccessResolver_SelfAndAncestor(t *testing.T) {
 	sChild := createActiveDirSharing(t, inst, child.ID())
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(child.ID())
+	scopes, err := resolver.scopesMatching(child.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	require.Len(t, scopes, 2)
 	got := map[string]SharingScope{}
 	for _, sc := range scopes {
-		got[sc.SharingID] = sc
+		got[sc.Sharing.SID] = sc
 	}
 	assert.Contains(t, got, sParent.SID)
 	assert.Contains(t, got, sChild.SID)
@@ -99,7 +103,9 @@ func TestAccessResolver_SkipsInactive(t *testing.T) {
 	require.NoError(t, couchdb.UpdateDoc(inst, s))
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(child.ID())
+	scopes, err := resolver.scopesMatching(child.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	assert.Empty(t, scopes)
 }
@@ -124,7 +130,9 @@ func TestAccessResolver_SkipsLimitedAccess(t *testing.T) {
 	require.NoError(t, couchdb.UpdateDoc(inst, s))
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(child.ID())
+	scopes, err := resolver.scopesMatching(child.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	assert.Empty(t, scopes)
 }
@@ -147,10 +155,12 @@ func TestAccessResolver_FileTargetWithOwnShare(t *testing.T) {
 	s := createActiveFileSharing(t, inst, file.ID())
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(file.ID())
+	scopes, err := resolver.scopesMatching(file.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	require.Len(t, scopes, 1)
-	assert.Equal(t, s.SID, scopes[0].SharingID)
+	assert.Equal(t, s.SID, scopes[0].Sharing.SID)
 	assert.Equal(t, file.ID(), scopes[0].RootID)
 }
 
@@ -172,10 +182,12 @@ func TestAccessResolver_FileTargetInSharedDir(t *testing.T) {
 	s := createActiveDirSharing(t, inst, parent.ID())
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(file.ID())
+	scopes, err := resolver.scopesMatching(file.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	require.Len(t, scopes, 1)
-	assert.Equal(t, s.SID, scopes[0].SharingID)
+	assert.Equal(t, s.SID, scopes[0].Sharing.SID)
 	assert.Equal(t, parent.ID(), scopes[0].RootID)
 }
 
@@ -198,12 +210,14 @@ func TestAccessResolver_FileTargetAdditive(t *testing.T) {
 	sFile := createActiveFileSharing(t, inst, file.ID())
 
 	resolver := NewAccessResolver(inst)
-	scopes, err := resolver.scopesFor(file.ID())
+	scopes, err := resolver.scopesMatching(file.ID(), func(s *Sharing) *Member {
+		return s.MemberFor(inst)
+	})
 	require.NoError(t, err)
 	require.Len(t, scopes, 2)
 	got := map[string]SharingScope{}
 	for _, sc := range scopes {
-		got[sc.SharingID] = sc
+		got[sc.Sharing.SID] = sc
 	}
 	assert.Contains(t, got, sParent.SID)
 	assert.Contains(t, got, sFile.SID)
@@ -471,4 +485,154 @@ func createSharing(t *testing.T, inst *instance.Instance, rootID string, owner b
 	require.NoError(t, couchdb.CreateDoc(inst, s))
 	require.NoError(t, s.AddReferenceForSharing(inst, &s.Rules[0]))
 	return s
+}
+
+func TestAccessResolver_ResolveForMember(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+	setup := testutils.NewSetup(t, t.Name())
+	inst := setup.GetTestInstance()
+	fs := inst.VFS()
+
+	tree := H{"parent/": H{"child/": H{"nested.txt": H{}}, "top.txt": H{}}}
+	parent := createTree(t, fs, tree, consts.RootDirID)
+	child, err := fs.DirByPath(parent.Fullpath + "/child")
+	require.NoError(t, err)
+	nestedFile, err := fs.FileByPath(child.Fullpath + "/nested.txt")
+	require.NoError(t, err)
+	topFile, err := fs.FileByPath(parent.Fullpath + "/top.txt")
+	require.NoError(t, err)
+
+	daveInstance := "https://dave.example.net"
+	createActiveRecipientSharing(t, inst, parent.ID(), true, daveInstance)
+	createActiveRecipientSharing(t, inst, child.ID(), false, daveInstance)
+
+	resolver := NewAccessResolver(inst)
+	dave := &Member{Email: "dave@example.net", Instance: daveInstance}
+
+	t.Run("WriteViaNestedScope", func(t *testing.T) {
+		ea, err := resolver.ResolveForMember(nestedFile.ID(), dave)
+		require.NoError(t, err)
+		assert.True(t, ea.CanRead)
+		assert.True(t, ea.CanWrite)
+		assert.True(t, ea.Can(permission.GET))
+		assert.True(t, ea.Can(permission.PATCH))
+		assert.Len(t, ea.SourceSharingIDs, 2)
+	})
+
+	t.Run("ReadOnlyViaRootScope", func(t *testing.T) {
+		ea, err := resolver.ResolveForMember(topFile.ID(), dave)
+		require.NoError(t, err)
+		assert.True(t, ea.CanRead)
+		assert.False(t, ea.CanWrite)
+		assert.False(t, ea.Can(permission.PATCH))
+	})
+
+	t.Run("MatchingByInstanceHost", func(t *testing.T) {
+		ea, err := resolver.ResolveForMember(topFile.ID(), &Member{Instance: daveInstance})
+		require.NoError(t, err)
+		assert.True(t, ea.CanRead)
+	})
+
+	t.Run("NotAMember", func(t *testing.T) {
+		stranger := &Member{Email: "stranger@example.net", Instance: "https://stranger.example.net"}
+		ea, err := resolver.ResolveForMember(topFile.ID(), stranger)
+		require.NoError(t, err)
+		assert.False(t, ea.CanRead)
+		assert.False(t, ea.CanWrite)
+	})
+
+	t.Run("NilMember", func(t *testing.T) {
+		ea, err := resolver.ResolveForMember(topFile.ID(), nil)
+		require.NoError(t, err)
+		assert.False(t, ea.CanRead)
+	})
+}
+
+func TestAccessResolver_NearestWritableSharing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+	setup := testutils.NewSetup(t, t.Name())
+	inst := setup.GetTestInstance()
+	fs := inst.VFS()
+
+	tree := H{"parent/": H{"child/": H{"nested.txt": H{}}, "top.txt": H{}}}
+	parent := createTree(t, fs, tree, consts.RootDirID)
+	child, err := fs.DirByPath(parent.Fullpath + "/child")
+	require.NoError(t, err)
+	nestedFile, err := fs.FileByPath(child.Fullpath + "/nested.txt")
+	require.NoError(t, err)
+	topFile, err := fs.FileByPath(parent.Fullpath + "/top.txt")
+	require.NoError(t, err)
+
+	daveInstance := "https://dave.example.net"
+	dave := &Member{Email: "dave@example.net", Instance: daveInstance}
+	sParent := createActiveRecipientSharing(t, inst, parent.ID(), false, daveInstance)
+	sChild := createActiveRecipientSharing(t, inst, child.ID(), false, daveInstance)
+
+	resolver := NewAccessResolver(inst)
+
+	t.Run("DeepestWritableScopeWins", func(t *testing.T) {
+		sc, err := resolver.NearestWritableSharing(nestedFile.ID(), dave)
+		require.NoError(t, err)
+		require.NotNil(t, sc)
+		assert.Equal(t, sChild.SID, sc.Sharing.SID)
+		assert.Equal(t, child.ID(), sc.RootID)
+		// The member entry is the one inside the returned sharing.
+		assert.Same(t, &sc.Sharing.Members[1], sc.Member)
+	})
+
+	t.Run("OuterScopeWhenNoNestedOneApplies", func(t *testing.T) {
+		sc, err := resolver.NearestWritableSharing(topFile.ID(), dave)
+		require.NoError(t, err)
+		require.NotNil(t, sc)
+		assert.Equal(t, sParent.SID, sc.Sharing.SID)
+		assert.Equal(t, parent.ID(), sc.RootID)
+	})
+}
+
+func TestAccessResolver_NearestWritableSharingSkipsReadOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+	setup := testutils.NewSetup(t, t.Name())
+	inst := setup.GetTestInstance()
+	fs := inst.VFS()
+
+	tree := H{"parent/": H{"child/": H{"nested.txt": H{}}, "top.txt": H{}}}
+	parent := createTree(t, fs, tree, consts.RootDirID)
+	child, err := fs.DirByPath(parent.Fullpath + "/child")
+	require.NoError(t, err)
+	nestedFile, err := fs.FileByPath(child.Fullpath + "/nested.txt")
+	require.NoError(t, err)
+	topFile, err := fs.FileByPath(parent.Fullpath + "/top.txt")
+	require.NoError(t, err)
+
+	daveInstance := "https://dave.example.net"
+	dave := &Member{Email: "dave@example.net", Instance: daveInstance}
+	createActiveRecipientSharing(t, inst, parent.ID(), true, daveInstance)
+	sChild := createActiveRecipientSharing(t, inst, child.ID(), false, daveInstance)
+
+	resolver := NewAccessResolver(inst)
+
+	t.Run("NestedScopeSkipsReadOnlyRoot", func(t *testing.T) {
+		sc, err := resolver.NearestWritableSharing(nestedFile.ID(), dave)
+		require.NoError(t, err)
+		require.NotNil(t, sc)
+		assert.Equal(t, sChild.SID, sc.Sharing.SID)
+	})
+
+	t.Run("NilWhenOnlyReadOnlyApplies", func(t *testing.T) {
+		sc, err := resolver.NearestWritableSharing(topFile.ID(), dave)
+		require.NoError(t, err)
+		assert.Nil(t, sc)
+	})
 }

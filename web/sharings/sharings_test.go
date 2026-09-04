@@ -30,6 +30,7 @@ import (
 	"github.com/cozy/cozy-stack/web/errors"
 	"github.com/cozy/cozy-stack/web/files"
 	"github.com/cozy/cozy-stack/web/middlewares"
+	"github.com/cozy/cozy-stack/web/notes"
 	"github.com/cozy/cozy-stack/web/permissions"
 	"github.com/cozy/cozy-stack/web/sharings"
 	"github.com/cozy/cozy-stack/web/statik"
@@ -2517,4 +2518,112 @@ func TestReadOnlyHandlers(t *testing.T) {
 			WithHeader("Authorization", "Bearer "+ownerAppToken).
 			Expect().Status(422)
 	})
+}
+
+// TestOpenNoteInPreviewReturnsReadOnlySharecode checks that opening a note
+// from a sharing preview returns a read-only sharecode: the rules have no
+// sync (ReadOnlyRules is true) and the member is not flagged read-only, but
+// the previewer must not get a write-capable share-interact code.
+func TestOpenNoteInPreviewReturnsReadOnlySharecode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	config.UseTestFile(t)
+	build.BuildMode = build.ModeDev
+	config.GetConfig().Assets = "../../assets"
+	_ = web.LoadSupportedLocales()
+	testutils.NeedCouchdb(t)
+	render, _ := statik.NewDirRenderer("../../assets")
+	middlewares.BuildTemplates()
+
+	setup := testutils.NewSetup(t, t.Name()+"_alice")
+	aliceInstance := setup.GetTestInstance(&lifecycle.Options{
+		Email:      "alice@example.net",
+		PublicName: "Alice",
+	})
+	aliceAppToken := generateAppToken(aliceInstance, "testapp", consts.Files)
+	tsA := setup.GetTestServerMultipleRoutes(map[string]func(*echo.Group){
+		"/notes":       notes.Routes,
+		"/permissions": permissions.Routes,
+		"/sharings":    sharings.Routes,
+	})
+	tsA.Config.Handler.(*echo.Echo).Renderer = render
+	tsA.Config.Handler.(*echo.Echo).HTTPErrorHandler = errors.ErrorHandler
+	t.Cleanup(tsA.Close)
+
+	require.NoError(t, dynamic.InitDynamicAssetFS(config.FsURL().String()), "Could not init dynamic FS")
+	eA := httpexpect.Default(t, tsA.URL)
+
+	noteSchema := `{
+		"nodes": [
+			["doc", { "content": "block+" }],
+			["paragraph", { "content": "inline*", "group": "block" }],
+			["text", { "group": "inline" }]
+		],
+		"marks": [],
+		"topNode": "doc"
+	}`
+	noteObj := eA.POST("/notes").
+		WithHeader("Authorization", "Bearer "+aliceAppToken).
+		WithHeader("Content-Type", "application/json").
+		WithBytes([]byte(`{
+			"data": {
+				"type": "io.cozy.notes.documents",
+				"attributes": {
+					"title": "Preview Note",
+					"schema": ` + noteSchema + `
+				}
+			}
+		}`)).
+		Expect().Status(201).
+		JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+		Object()
+	noteID := noteObj.Value("data").Object().Value("id").String().NotEmpty().Raw()
+
+	bobContact := createContact(t, aliceInstance, "Bob", "bob@example.net")
+	sharingObj := eA.POST("/sharings/").
+		WithHeader("Authorization", "Bearer "+aliceAppToken).
+		WithHeader("Content-Type", "application/vnd.api+json").
+		WithBytes([]byte(`{
+		"data": {
+			"type": "` + consts.Sharings + `",
+			"attributes": {
+				"description": "preview of a note",
+				"preview_path": "/preview",
+				"rules": [{
+					"title": "note",
+					"doctype": "` + consts.Files + `",
+					"values": ["` + noteID + `"]
+				}]
+			},
+			"relationships": {
+				"recipients": {
+					"data": [{"id": "` + bobContact.ID() + `", "type": "` + bobContact.DocType() + `"}]
+				}
+			}
+		}
+	}`)).
+		Expect().Status(201).
+		JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+		Object()
+	sharingID := sharingObj.Value("data").Object().Value("id").String().NotEmpty().Raw()
+
+	preview, err := permission.GetForSharePreview(aliceInstance, sharingID)
+	require.NoError(t, err)
+	code, ok := preview.Codes["bob@example.net"]
+	require.True(t, ok, "no preview code for bob@example.net in %v", preview.Codes)
+
+	sharecode := eA.GET("/notes/"+noteID+"/open").
+		WithHeader("Authorization", "Bearer "+code).
+		Expect().Status(200).
+		JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+		Object().Path("$.data.attributes.sharecode").String().NotEmpty().Raw()
+
+	permObj := eA.GET("/permissions/self").
+		WithHeader("Authorization", "Bearer "+sharecode).
+		Expect().Status(200).
+		JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+		Object()
+	permObj.Path("$.data.attributes.type").String().IsEqual(permission.TypeSharePreview)
 }

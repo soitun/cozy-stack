@@ -18,6 +18,12 @@ import (
 // OpenURL is the API handler for GET /editor/:file-id/open. It returns the
 // parameters to build the URL where the file can be opened by an editor.
 func OpenURL(c echo.Context) error {
+	return OpenURLWithReadOnly(c, c.QueryParam("ReadOnly") == "true")
+}
+
+// OpenURLWithReadOnly is like OpenURL, with the read-only flag given
+// explicitly instead of read from the query.
+func OpenURLWithReadOnly(c echo.Context, readOnly bool) error {
 	inst := middlewares.GetInstance(c)
 	fileID := c.Param("file-id")
 	open, err := sharing.OpenEditor(inst, fileID)
@@ -30,7 +36,6 @@ func OpenURL(c echo.Context) error {
 		return err
 	}
 	memberIndex, _ := strconv.Atoi(c.QueryParam("MemberIndex"))
-	readOnly := c.QueryParam("ReadOnly") == "true"
 
 	// If a directory is shared by link and contains the file, it can be opened
 	// with the same sharecode as the directory. The sharecode is also used to

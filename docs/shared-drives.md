@@ -337,6 +337,76 @@ Content-Type: application/vnd.api+json
 Unless stated otherwise, a permission on the whole `io.cozy.files` doctype is
 required to use the following routes.
 
+Authorization is resolved against the **effective access** of the target file
+or folder, not only the membership of the route's shared drive. The effective
+access combines every sharing scope applying to the target (the sharing of
+the route, plus any nested shared folder on its path) where the caller is a
+member:
+
+- read routes targeting a file or folder by its ID (`GET`/`HEAD
+  .../:file-id`, download, thumbnails) require effective read on the target;
+- `GET /sharings/drives/:id/metadata` requires effective read on the folder
+  or file resolved from its `Path` query parameter, and answers
+  `404 Not Found` when the path resolves outside every sharing scope of the
+  caller (so that the existence of paths outside the drive is not revealed);
+- write, update and delete routes (`POST`, `PUT`, `PATCH`, `DELETE`) require
+  effective write on the target file or folder;
+- creation and upload routes require effective write on the destination
+  folder;
+- `PATCH` (metadata update, rename) requires effective write on the source
+  item; a move (the `parent` relationship) additionally requires effective
+  write on the destination folder;
+- `POST /sharings/drives/:id/:file-id/copy` requires effective read on the
+  source file and effective write on the destination folder;
+- open routes (`GET /sharings/drives/:id/notes/:file-id/open`, `GET
+  /sharings/drives/:id/office/:file-id/open`, `GET
+  /sharings/drives/:id/editor/:file-id/open`) require effective read on the
+  target file. The opening is **forced read-only** when the member lacks
+  effective write on the target: the share-interact token carries ALL verbs
+  (including write), so the read-only restriction is enforced at the
+  application layer by rewriting the `ReadOnly` query parameter to `true`
+  before delegating to the note/office/editor handler. A member with
+  effective write access opens the file in read-write mode (unless they
+  explicitly pass `ReadOnly=true`); in that case the returned sharecode is
+  minted from the nearest sharing scope that grants the effective write (e.g.
+  a nested drive), never from the drive whose route was called when that
+  drive only grants read: the share-interact permission set covers the whole
+  drive, and a code scoped beyond the member's effective write would let them
+  write files they cannot write;
+- trash routes (`POST`/`DELETE /sharings/drives/:id/trash/:file-id`) target
+  files outside every sharing scope: restore and destroy require effective
+  write on the folder the file would be restored to (or on its first
+  existing ancestor when the original folder hierarchy was deleted, as the
+  restore recreates it there);
+- temporary download links (`POST /sharings/drives/:id/downloads` and `POST
+  /sharings/drives/:id/archive`) require effective read on every target
+  before minting the link. A target outside every sharing scope of the
+  caller is answered `404 Not Found`. The resulting `:secret` URL is not
+  authenticated (by design, so browsers can use it directly), so the link
+  should be treated as a capability: anyone holding it can download the
+  prepared content until it expires.
+
+`GET /sharings/drives/:id/_changes` is not resolved per target: it returns
+the changes of the whole drive to every member. In the additive access mode,
+every member of the drive can read every file of the drive anyway, so no
+per-line filtering is needed.
+
+A typical consequence: a member who is read-only on the drive root but has
+write access on a nested shared folder can write inside that folder through
+the drive routes, and is answered `403 Forbidden` elsewhere.
+
+Known limitation: write routes without a file target (`POST
+/sharings/drives/:id/`, `POST /sharings/drives/:id/upload/metadata`, `POST
+/sharings/drives/:id/notes`) are authorized against the effective write
+access on the **drive root**, not on the actual destination folder declared
+in the request body (`dir_id`). As a consequence, a member who is read-only
+on the drive root but has write access on a nested shared folder cannot use
+these routes to target that folder: they get a `403 Forbidden` false
+negative. Clients in that situation should use a targeted route instead
+(`POST /sharings/drives/:id/:file-id` with the destination folder ID), which
+is checked against the effective access of the destination folder. This
+limitation will be lifted with `limited_access` support.
+
 For file-root shared drives (`drive_root_type = file`), iteration 1 currently
 supports only file-shaped routes. Directory-only routes return
 `422 Unprocessable Entity`. `_changes` and realtime are available with exact
@@ -355,6 +425,8 @@ Two-step download of a single file: creates a short-lived secret link (valid 10 
 
 Identical call to [`POST /files/downloads`](files.md#post-filesdownloads) but over a shared drive. The `links.related` in the response will point to `/sharings/drives/:id/downloads/:secret/:filename` instead of `/files/downloads/...`.
 
+Drive tokens (share-interact) are checked against the member's effective read access on the target file; a target outside every sharing scope of the caller is answered `404 Not Found`.
+
 ### GET /sharings/drives/:id/downloads/:secret/:fake-name
 
 Download the file prepared by the `POST /sharings/drives/:id/downloads` call above. The `:fake-name` segment is ignored by the server — it exists solely so browsers use it as the suggested save-as filename.
@@ -369,6 +441,8 @@ This route is supported only for directory-root shared drives. File-root shared
 drives return `422 Unprocessable Entity`.
 
 The request body follows the same format as [`POST /files/archive`](files.md#post-filesarchive). The `links.related` in the response points to `/sharings/drives/:id/archive/:secret/:name.zip` instead of `/files/archive/...`.
+
+Drive tokens (share-interact) are checked against the member's effective read access on every target (`ids` and `files` entries); any target outside every sharing scope of the caller fails the whole request with `404 Not Found`. The `/` and `/files` pseudo-entries are governed by the VFS permission check only (they cover the whole account, outside any drive scope).
 
 #### Request
 
@@ -869,6 +943,10 @@ shared drive:
 - `PATCH /sharings/drives/:id/permissions/:perm-id`
 - `DELETE /sharings/drives/:id/permissions/:perm-id`
 
+On every route, the targeted file or folder must be **effectively readable**
+by the caller (see the effective access rules in
+[Files and directories](#files-and-directories)).
+
 ### GET /sharings/drives/:id/permissions?ids=...
 
 Lists the share-by-link permissions for the requested file or folder IDs inside
@@ -1058,12 +1136,16 @@ drives return `422 Unprocessable Entity`.
 Return the parameters to build the URL where the note can be opened.
 Identical to [`GET /notes/:file-id/open`](notes.md#get-notesidopen).
 
+Drive tokens (share-interact) are checked against the member's effective read access on the target; a target outside every sharing scope of the caller is answered `404 Not Found`. The opening is forced read-only (the sharecode resolves to a `share-preview` permission) when the member lacks effective write access on the target. Otherwise the sharecode is minted from the nearest sharing scope that grants the effective write.
+
 ## Office
 
 ### GET /sharings/drives/:id/office/:file-id/open
 
 Returns the parameters to open an office document. Identical to
 [`GET /office/:file-id/open`](office.md#get-officeidopen).
+
+Drive tokens are checked and the opening forced read-only the same way as the notes open route.
 
 ## Editors
 
@@ -1073,9 +1155,7 @@ Return the parameters to open a file from a shared drive with an editor.
 Identical to [`GET /editor/:file-id/open`](files.md#get-editorfile-idopen), but
 scoped to the shared drive.
 
-Recipients are resolved through the shared-drive owner instance, so the returned
-`instance`, `file_id`, and `sharecode` are the values to use for opening the
-file on that owner instance.
+Drive tokens are checked and the opening forced read-only the same way as the notes open route.
 
 ## Shortcuts
 

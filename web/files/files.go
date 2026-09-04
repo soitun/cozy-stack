@@ -1494,6 +1494,20 @@ func ReadTrashFilesHandler(c echo.Context) error {
 
 // Restore handle POST requests on /files/trash/file-id and
 // can be used to restore a file or directory from the trash.
+//
+// driveMemberAuthorized reports whether the request carries a shared-drive
+// member token reaching this handler via a drive route: the route guard in
+// web/sharings/drives.go has already authorized it, and the VFS permission
+// check cannot succeed on a trashed file (no referenced_by, path in the
+// trash), so it is skipped.
+func driveMemberAuthorized(c echo.Context, sharedDrive *sharing.Sharing) bool {
+	if sharedDrive == nil {
+		return false
+	}
+	pdoc, err := middlewares.GetPermission(c)
+	return err == nil && pdoc.Type == permission.TypeShareInteract
+}
+
 func Restore(c echo.Context, sharedDrive *sharing.Sharing) error {
 	instance := middlewares.GetInstance(c)
 
@@ -1504,9 +1518,11 @@ func Restore(c echo.Context, sharedDrive *sharing.Sharing) error {
 		return WrapVfsError(err)
 	}
 
-	err = checkPerm(c, permission.PATCH, dir, file)
-	if err != nil {
-		return err
+	if !driveMemberAuthorized(c, sharedDrive) {
+		err = checkPerm(c, permission.PATCH, dir, file)
+		if err != nil {
+			return err
+		}
 	}
 
 	if dir != nil {
@@ -1575,6 +1591,10 @@ func ClearTrashHandler(c echo.Context) error {
 
 // DestroyFileHandler handles DELETE request to clear one element from the trash
 func DestroyFileHandler(c echo.Context) error {
+	return Destroy(c, nil)
+}
+
+func Destroy(c echo.Context, sharedDrive *sharing.Sharing) error {
 	inst := middlewares.GetInstance(c)
 
 	fileID := c.Param("file-id")
@@ -1584,9 +1604,12 @@ func DestroyFileHandler(c echo.Context) error {
 		return WrapVfsError(err)
 	}
 
-	err = checkPerm(c, permission.DELETE, dir, file)
-	if err != nil {
-		return err
+	// Same skip as Restore: see driveMemberAuthorized.
+	if !driveMemberAuthorized(c, sharedDrive) {
+		err = checkPerm(c, permission.DELETE, dir, file)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Check antivirus status for files
