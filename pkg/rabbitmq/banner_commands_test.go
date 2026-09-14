@@ -178,7 +178,6 @@ func TestBannerCommandsThroughTheBroker(t *testing.T) {
 		trial, err := banner.Stored(inst, banner.CategoryTrial)
 		require.NoError(t, err)
 		assert.Nil(t, trial)
-
 	})
 }
 
