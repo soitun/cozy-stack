@@ -1,41 +1,13 @@
 package banner
 
 import (
-	"context"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/cozy/cozy-stack/pkg/config/config"
-	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/i18n"
 	"github.com/cozy/cozy-stack/pkg/metadata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestMain loads the real catalogs so a stale message id breaks the test, not
-// production, and brings up the global database (inlined from testutils to
-// avoid a circular import).
-func TestMain(m *testing.M) {
-	for _, locale := range []string{"en", "fr"} {
-		po, err := os.ReadFile("../../assets/locales/" + locale + ".po")
-		if err != nil {
-			panic(err)
-		}
-		i18n.LoadLocale(locale, "", po)
-	}
-	if err := config.LoadTestFile(); err != nil {
-		panic(err)
-	}
-	ctx := context.Background()
-	if _, err := couchdb.CheckStatus(ctx); err == nil {
-		if err := couchdb.InitGlobalDB(ctx); err != nil {
-			panic(err)
-		}
-	}
-	os.Exit(m.Run())
-}
 
 var now = time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 
