@@ -60,6 +60,7 @@ func useCommandContexts(t *testing.T) {
 		commandContext: map[string]interface{}{
 			"enable_banners":            true,
 			"banner_command_categories": []interface{}{banner.CategoryBilling, banner.CategoryTrial},
+			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
 		},
 		refusedContext: map[string]interface{}{
 			"enable_banners": true,
@@ -409,6 +410,17 @@ func TestApplyCommand(t *testing.T) {
 		assert.Nil(t, stored, "skipping must not advance the revision")
 	})
 
+	t.Run("a CTA host the context does not accept is skipped", func(t *testing.T) {
+		inst := newInstance(t, commandContext, "en", "")
+		cmd := materialize(t, inst, 85)
+		cmd.CTA.URL = "https://evil.example/pay"
+
+		require.NoError(t, banner.ApplyCommand(cmd))
+		stored, err := banner.Stored(inst, banner.CategoryBilling)
+		require.NoError(t, err)
+		assert.Nil(t, stored, "skipping must not advance the revision")
+	})
+
 	t.Run("an instance that displays no banner is a no-op", func(t *testing.T) {
 		inst := newInstance(t, noBannerContext, "en", "")
 
@@ -544,6 +556,7 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 		conf.Contexts[refusedContext] = map[string]interface{}{
 			"enable_banners":            true,
 			"banner_command_categories": []interface{}{banner.CategoryBilling},
+			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
 		}
 		t.Cleanup(func() {
 			conf.Contexts[refusedContext] = map[string]interface{}{"enable_banners": true}

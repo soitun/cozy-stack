@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -45,9 +46,10 @@ type Command struct {
 
 	// EventID is the backend's correlation id, logged for traceability.
 	EventID string `json:"eventId,omitempty"`
-	// Revision is a positive counter the backend increments per target and
-	// category. Delivery is at-least-once and unordered, so this (not the
-	// arrival time) orders a command against what is stored.
+	// Revision is a positive counter the backend increments per category. The
+	// stack stores one per instance and category, shared by tenant and
+	// workplace commands. Delivery is at-least-once and unordered, so this
+	// (not the arrival time) orders a command against what is stored.
 	Revision int64 `json:"revision"`
 	// Timestamp is when the backend decided, in epoch seconds. Provenance
 	// only: it orders nothing.
@@ -129,8 +131,11 @@ func (cmd Command) targets() ([]*instance.Instance, error) {
 }
 
 func (cmd Command) applyTo(inst *instance.Instance) error {
-	// Instances that disable banners or disallow this category are skipped.
-	if !inst.HasBannersEnabled() || !inst.AllowsBannerCategory(cmd.Category) {
+	if !inst.HasBannersEnabled() {
+		return nil
+	}
+	if reason := cmd.refusal(inst); reason != "" {
+		log(inst).Warnf("%s: skipping revision %d, %s", cmd.Category, cmd.Revision, reason)
 		return nil
 	}
 
@@ -153,6 +158,31 @@ func (cmd Command) applyTo(inst *instance.Instance) error {
 	}
 
 	return Materialize(inst, cmd.Category, cmd.banner(inst.Locale), time.Now())
+}
+
+// refusal says why the instance's context does not accept the command, or ""
+// when it does.
+func (cmd Command) refusal(inst *instance.Instance) string {
+	if !inst.AllowsBannerCategory(cmd.Category) {
+		return "category not in banner_command_categories"
+	}
+	for _, cta := range []*CommandCTA{cmd.CTA, cmd.SecondaryCTA} {
+		if cta == nil {
+			continue
+		}
+		if host := ctaHost(cta.URL); !inst.AllowsBannerCTAHost(host) {
+			return fmt.Sprintf("CTA host %q not in banner_cta_hosts", host)
+		}
+	}
+	return ""
+}
+
+func ctaHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // banner keeps the accepted command with the localized presentation. Clears

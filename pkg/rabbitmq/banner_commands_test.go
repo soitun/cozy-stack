@@ -43,6 +43,7 @@ func TestBannerCommandsThroughTheBroker(t *testing.T) {
 		contextName: map[string]interface{}{
 			"enable_banners":            true,
 			"banner_command_categories": []interface{}{"billing"},
+			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
 		},
 	}
 	t.Cleanup(func() { conf.Contexts = previous })

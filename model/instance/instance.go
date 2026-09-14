@@ -904,16 +904,26 @@ func (i *Instance) HasBannersEnabled() bool {
 // AllowsBannerCategory reports whether the context settings allow the banner
 // command queue to write a category on this instance.
 func (i *Instance) AllowsBannerCategory(category string) bool {
+	return i.contextListHas("banner_command_categories", category)
+}
+
+// AllowsBannerCTAHost reports whether the context settings allow a banner
+// command's call to action to link to this host.
+func (i *Instance) AllowsBannerCTAHost(host string) bool {
+	return i.contextListHas("banner_cta_hosts", host)
+}
+
+func (i *Instance) contextListHas(key, value string) bool {
 	ctxSettings, ok := i.SettingsContext()
 	if !ok {
 		return false
 	}
-	categories, ok := ctxSettings["banner_command_categories"].([]interface{})
+	list, ok := ctxSettings[key].([]interface{})
 	if !ok {
 		return false
 	}
-	for _, allowed := range categories {
-		if name, ok := allowed.(string); ok && name == category {
+	for _, item := range list {
+		if s, ok := item.(string); ok && s == value {
 			return true
 		}
 	}
