@@ -12,8 +12,6 @@ import (
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/pkg/config/config"
 	"github.com/cozy/cozy-stack/pkg/consts"
-	"github.com/cozy/cozy-stack/pkg/couchdb"
-	"github.com/cozy/cozy-stack/pkg/prefixer"
 )
 
 // TriggerCommand is recorded on documents a backend asked for rather than a
@@ -143,7 +141,7 @@ func (cmd Command) applyTo(inst *instance.Instance) error {
 	}
 	defer mu.Unlock()
 
-	stored, err := storedCommand(inst, cmd.Category)
+	stored, err := Stored(inst, cmd.Category)
 	if err != nil {
 		return err
 	}
@@ -153,102 +151,26 @@ func (cmd Command) applyTo(inst *instance.Instance) error {
 		return nil
 	}
 
-	// Banner before record: a crash in between is healed by the next
-	// delivery (Materialize is idempotent). The reverse would record a
-	// decision the user never saw.
-	if err := Materialize(inst, cmd.Category, cmd.banner(inst.Locale), time.Now()); err != nil {
-		return err
-	}
-
-	next := cmd.state()
-	if stored != nil {
-		next.DocID, next.DocRev = stored.DocID, stored.DocRev
-		return couchdb.UpdateDoc(inst, next)
-	}
-	next.DocID = docID(cmd.Category)
-	return couchdb.CreateNamedDocWithDB(inst, next)
+	return Materialize(inst, cmd.Category, cmd.banner(inst.Locale), time.Now())
 }
 
-// commandState records the last command accepted for a category, so ordering
-// survives clears (which leave no public document) and unchanged decisions.
-// It keeps the command whole, so the stack can pick the language again when
-// the instance changes locale without the backend publishing anything. The
-// doctype is blocklisted, so none of this is reachable from an application.
-type commandState struct {
-	DocID  string `json:"_id,omitempty"`
-	DocRev string `json:"_rev,omitempty"`
-
-	Category string `json:"category"`
-	Revision int64  `json:"revision"`
-	Clear    bool   `json:"clear"`
-	EventID  string `json:"eventId,omitempty"`
-
-	// Accepted is the command as it arrived, with every locale the backend
-	// sent. Absent on a clear, and on a record written before the stack
-	// retained it: only a new command can refresh one of those.
-	Accepted *Command `json:"accepted,omitempty"`
-}
-
-func (d *commandState) ID() string         { return d.DocID }
-func (d *commandState) Rev() string        { return d.DocRev }
-func (d *commandState) DocType() string    { return consts.BannerCommands }
-func (d *commandState) SetID(id string)    { d.DocID = id }
-func (d *commandState) SetRev(rev string)  { d.DocRev = rev }
-func (d *commandState) Clone() couchdb.Doc { cloned := *d; return &cloned }
-
-var _ couchdb.Doc = &commandState{}
-
-func (cmd Command) state() *commandState {
-	state := &commandState{
-		Category: cmd.Category,
-		Revision: cmd.Revision,
-		Clear:    cmd.Clear,
-		EventID:  cmd.EventID,
-	}
-	// A clear has no wording to keep, and its category holds no document to
-	// re-localize.
-	if !cmd.Clear {
-		accepted := cmd
-		state.Accepted = &accepted
-	}
-	return state
-}
-
-// storedCommands returns the state retained for every category of an instance.
-func storedCommands(db prefixer.Prefixer) ([]*commandState, error) {
-	var states []*commandState
-	err := couchdb.GetAllDocs(db, consts.BannerCommands, nil, &states)
-	if couchdb.IsNoDatabaseError(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return states, nil
-}
-
-// storedCommand returns the state retained for a category, or nil when none
-// exists (including a missing database, which is the first command on an instance).
-func storedCommand(db prefixer.Prefixer, category string) (*commandState, error) {
-	var doc commandState
-	err := couchdb.GetDoc(db, consts.BannerCommands, docID(category), &doc)
-	if couchdb.IsNotFoundError(err) || couchdb.IsNoDatabaseError(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &doc, nil
-}
-
-// banner is the document the command asks for, or nil for a clear.
+// banner keeps the accepted command with the localized presentation. Clears
+// retain the revision in an expired document, including when no banner existed.
 func (cmd Command) banner(instanceLocale string) *Banner {
-	if cmd.Clear {
-		return nil
-	}
 	at := time.Unix(cmd.Timestamp, 0).UTC()
+	if cmd.Clear {
+		ended := time.Unix(0, 0).UTC()
+		return &Banner{
+			Category: cmd.Category,
+			Revision: cmd.Revision,
+			EventID:  cmd.EventID,
+			Cleared:  true,
+			EndsAt:   &ended,
+			Source:   Source{Trigger: TriggerCommand, At: at},
+		}
+	}
 	locale := cmd.locale(instanceLocale)
-	b := &Banner{
+	return &Banner{
 		BannerID:     cmd.BannerID,
 		Category:     cmd.Category,
 		Severity:     cmd.Severity,
@@ -263,8 +185,10 @@ func (cmd Command) banner(instanceLocale string) *Banner {
 		StartsAt:     cmd.StartsAt,
 		EndsAt:       cmd.EndsAt,
 		Source:       Source{Trigger: TriggerCommand, At: at},
+		Revision:     cmd.Revision,
+		EventID:      cmd.EventID,
+		Accepted:     &cmd,
 	}
-	return b
 }
 
 // locale picks one language for the whole banner. A locale the backend only

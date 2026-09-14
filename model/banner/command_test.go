@@ -255,10 +255,15 @@ func TestCommandDocumentShape(t *testing.T) {
 		assert.Equal(t, at, b.Source.At, "and Materialize starts a first one at the decision")
 	})
 
-	t.Run("a clear produces no document", func(t *testing.T) {
+	t.Run("a clear produces an expired ordering record", func(t *testing.T) {
 		cmd := valid(t)
 		cmd.Clear = true
-		assert.Nil(t, cmd.banner("en"))
+		b := cmd.banner("en")
+		require.NotNil(t, b)
+		assert.True(t, b.Cleared)
+		require.NotNil(t, b.EndsAt)
+		assert.True(t, b.EndsAt.Before(time.Now()))
+		assert.Nil(t, b.Accepted)
 	})
 }
 
@@ -386,12 +391,15 @@ func storedBanner(t *testing.T, inst *instance.Instance) *Banner {
 	t.Helper()
 	stored, err := Stored(inst, CategoryBilling)
 	require.NoError(t, err)
+	if stored != nil && stored.Cleared {
+		return nil
+	}
 	return stored
 }
 
-func storedState(t *testing.T, inst *instance.Instance) *commandState {
+func storedState(t *testing.T, inst *instance.Instance) *Banner {
 	t.Helper()
-	stored, err := storedCommand(inst, CategoryBilling)
+	stored, err := Stored(inst, CategoryBilling)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	return stored
@@ -427,7 +435,7 @@ func TestApplyCommand(t *testing.T) {
 		assert.Equal(t, TriggerCommand, stored.Source.Trigger)
 	})
 
-	t.Run("an unchanged newer decision advances the ordering without rewriting", func(t *testing.T) {
+	t.Run("an unchanged newer decision persists its ordering", func(t *testing.T) {
 		inst := newInstance(t, commandContext, "en", "")
 		require.NoError(t, ApplyCommand(materialize(t, inst, 10)))
 		created := storedBanner(t, inst)
@@ -436,7 +444,8 @@ func TestApplyCommand(t *testing.T) {
 		require.NoError(t, ApplyCommand(materialize(t, inst, 11)))
 		again := storedBanner(t, inst)
 		require.NotNil(t, again)
-		assert.Equal(t, created.DocRev, again.DocRev, "an unchanged banner must not wake the realtime clients")
+		assert.NotEqual(t, created.DocRev, again.DocRev)
+		assert.Equal(t, int64(11), again.Revision)
 
 		// The stale clear is what the old timestamp guard let through: the
 		// document it would compare against never moved.
@@ -444,7 +453,19 @@ func TestApplyCommand(t *testing.T) {
 		assert.NotNil(t, storedBanner(t, inst), "a clear older than the last decision changes nothing")
 	})
 
-	t.Run("a clear removes the document and outlives a stale materialize", func(t *testing.T) {
+	t.Run("a newer translation is retained even when the displayed language is unchanged", func(t *testing.T) {
+		inst := newInstance(t, commandContext, "en", "")
+		original := materialize(t, inst, 12)
+		require.NoError(t, ApplyCommand(original))
+		updated := materialize(t, inst, 13)
+		updated.Text["fr"] = "Veuillez vérifier votre carte."
+		require.NoError(t, ApplyCommand(updated))
+		assert.Equal(t, original.Text["en"], storedBanner(t, inst).Text)
+		require.NoError(t, lifecycle.Patch(inst, &lifecycle.Options{Locale: "fr"}))
+		assert.Equal(t, updated.Text["fr"], storedBanner(t, inst).Text)
+	})
+
+	t.Run("a clear expires the document and outlives a stale materialize", func(t *testing.T) {
 		inst := newInstance(t, commandContext, "en", "")
 		require.NoError(t, ApplyCommand(materialize(t, inst, 20)))
 		require.NotNil(t, storedBanner(t, inst))
@@ -453,7 +474,20 @@ func TestApplyCommand(t *testing.T) {
 		assert.Nil(t, storedBanner(t, inst))
 
 		require.NoError(t, ApplyCommand(materialize(t, inst, 20)))
-		assert.Nil(t, storedBanner(t, inst), "the cleared category keeps its revision with no document to hold it")
+		assert.Nil(t, storedBanner(t, inst), "the expired document keeps the cleared revision")
+	})
+
+	t.Run("materializing after a clear starts a fresh occurrence", func(t *testing.T) {
+		inst := newInstance(t, commandContext, "en", "")
+		require.NoError(t, ApplyCommand(materialize(t, inst, 22)))
+		dismiss(t, inst)
+		require.NoError(t, ApplyCommand(clearCommand(t, inst, 23)))
+		cleared := storedState(t, inst)
+		require.True(t, cleared.Cleared)
+		assert.Nil(t, cleared.Accepted)
+		require.NoError(t, ApplyCommand(materialize(t, inst, 24)))
+		require.NotNil(t, storedBanner(t, inst))
+		assert.Nil(t, storedBanner(t, inst).DismissedAt)
 	})
 
 	t.Run("a redelivery of the same revision changes nothing", func(t *testing.T) {
@@ -654,7 +688,7 @@ func TestApplyCommand(t *testing.T) {
 
 		require.NoError(t, ApplyCommand(materialize(t, inst, 80)))
 		assert.Nil(t, storedBanner(t, inst))
-		stored, err := storedCommand(inst, CategoryBilling)
+		stored, err := Stored(inst, CategoryBilling)
 		require.NoError(t, err)
 		assert.Nil(t, stored, "skipping must not advance the revision")
 	})
@@ -786,7 +820,7 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 		before := storedBanner(t, accepting)
 		require.NotNil(t, before)
 		assert.Nil(t, storedBanner(t, refusing))
-		stored, err := storedCommand(refusing, CategoryBilling)
+		stored, err := Stored(refusing, CategoryBilling)
 		require.NoError(t, err)
 		assert.Nil(t, stored, "skipping must not advance the member's revision")
 
@@ -811,7 +845,7 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 	})
 }
 
-func TestCommandStateIsNotInTheAppWritableDoctype(t *testing.T) {
+func TestCommandStateSharesTheBannerDocument(t *testing.T) {
 	config.UseTestFile(t)
 	needCouchDB(t)
 	useCommandContexts(t)
@@ -819,13 +853,28 @@ func TestCommandStateIsNotInTheAppWritableDoctype(t *testing.T) {
 	inst := newInstance(t, commandContext, "en", "")
 	require.NoError(t, ApplyCommand(materialize(t, inst, 42)))
 
-	stored, err := storedCommand(inst, CategoryBilling)
+	stored, err := Stored(inst, CategoryBilling)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
-	assert.Equal(t, consts.BannerCommands, stored.DocType())
-	assert.NotEqual(t, consts.Banners, stored.DocType(),
-		"an application allowed to record a dismissal must not reach the ordering record")
+	assert.Equal(t, consts.Banners, stored.DocType())
 	assert.Equal(t, int64(42), stored.Revision)
-	assert.False(t, stored.Clear)
+	assert.False(t, stored.Cleared)
 	assert.Equal(t, "banner-command-42", stored.EventID)
+}
+
+func TestClearBeforeMaterialize(t *testing.T) {
+	config.UseTestFile(t)
+	needCouchDB(t)
+	useCommandContexts(t)
+	inst := newInstance(t, commandContext, "en", "")
+	require.NoError(t, ApplyCommand(clearCommand(t, inst, 2)))
+	cleared := storedState(t, inst)
+	require.True(t, cleared.Cleared)
+	require.NotNil(t, cleared.EndsAt)
+	assert.True(t, cleared.EndsAt.Before(time.Now()))
+	require.NoError(t, ApplyCommand(materialize(t, inst, 1)))
+	assert.Equal(t, cleared.DocRev, storedState(t, inst).DocRev)
+	require.NoError(t, ApplyCommand(materialize(t, inst, 3)))
+	require.NotNil(t, storedBanner(t, inst))
+	assert.False(t, storedState(t, inst).Cleared)
 }

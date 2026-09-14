@@ -7,6 +7,8 @@ import (
 	"github.com/cozy/cozy-stack/model/instance/lifecycle"
 	"github.com/cozy/cozy-stack/model/vfs"
 	"github.com/cozy/cozy-stack/pkg/config/config"
+	"github.com/cozy/cozy-stack/pkg/consts"
+	"github.com/cozy/cozy-stack/pkg/couchdb"
 	"github.com/cozy/cozy-stack/pkg/logger"
 )
 
@@ -123,33 +125,24 @@ func refreshCommandsAt(domain string) error {
 	// ponytail: one _all_docs read per instance patch, including the quota
 	// patches that share this hook and never need it. Split the hook by reason
 	// if that read ever shows up.
-	states, err := storedCommands(inst)
+	var states []*Banner
+	err = couchdb.GetAllDocs(inst, consts.Banners, nil, &states)
+	if couchdb.IsNoDatabaseError(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 
 	now := time.Now()
 	for _, state := range states {
-		// A cleared category holds no document, and a record from before the
-		// stack retained the wording has nothing to pick from.
-		if state.Clear || state.Accepted == nil {
+		// Clears and banners without a retained command need no localization.
+		if state.Cleared || state.Accepted == nil {
 			continue
 		}
 		// A category the context has stopped accepting is left alone rather
 		// than rewritten; turning the setting off needs a cleanup either way.
 		if !inst.AllowsBannerCategory(state.Category) {
-			continue
-		}
-		// Re-localizing rewrites a banner, it does not restore one. The
-		// retained command carries the wording, not the occurrence's own
-		// start, which lives on the document an application is allowed to
-		// delete; recreating from the command alone would move a scheduled
-		// banner to the decision time of whichever command wrote last.
-		current, err := Stored(inst, state.Category)
-		if err != nil {
-			return err
-		}
-		if current == nil {
 			continue
 		}
 		if err := Materialize(inst, state.Category, state.Accepted.banner(inst.Locale), now); err != nil {

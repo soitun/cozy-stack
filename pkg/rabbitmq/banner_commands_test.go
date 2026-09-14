@@ -136,9 +136,9 @@ func TestBannerCommandsThroughTheBroker(t *testing.T) {
 		assert.Equal(t, "billing.grace.cycle-a.attempt-2", stored().BannerID)
 	})
 
-	t.Run("a clear removes it, and a redelivered older command does not bring it back", func(t *testing.T) {
+	t.Run("a clear expires it, and a redelivered older command does not bring it back", func(t *testing.T) {
 		publish(t, rabbitmq.RoutingKeyBannerClear, command(t, "clear", 2, nil))
-		testutils.WaitForOrFail(t, 20*time.Second, func() bool { return stored() == nil })
+		testutils.WaitForOrFail(t, 20*time.Second, func() bool { b := stored(); return b != nil && b.Cleared })
 
 		publish(t, rabbitmq.RoutingKeyBannerMaterialize, command(t, "materialize", 1, nil))
 		// The queue processes serially. A rejected marker proves the stale
@@ -147,7 +147,10 @@ func TestBannerCommandsThroughTheBroker(t *testing.T) {
 		dead, ok := testutils.GetOneFromQueue(t, MQ, dlqName, 30*time.Second)
 		require.True(t, ok)
 		require.Contains(t, string(dead.Body), "stale-replay-barrier")
-		assert.Nil(t, stored(), "a stale delivery must leave the category cleared")
+		require.NotNil(t, stored())
+		assert.True(t, stored().Cleared, "a stale delivery must leave the category cleared")
+		require.NotNil(t, stored().EndsAt)
+		assert.True(t, stored().EndsAt.Before(time.Now()))
 	})
 
 	t.Run("a malformed command reaches the dead letter queue", func(t *testing.T) {
@@ -159,15 +162,22 @@ func TestBannerCommandsThroughTheBroker(t *testing.T) {
 		assertDeadLettered(t, dead)
 	})
 
-	t.Run("a command for a category the context refuses reaches the dead letter queue", func(t *testing.T) {
+	t.Run("a command for a category the context refuses is skipped", func(t *testing.T) {
 		publish(t, rabbitmq.RoutingKeyBannerMaterialize, command(t, "materialize", 4, func(p map[string]interface{}) {
 			p["category"] = "trial"
 		}))
 
+		// A marker proves the preceding command was processed and skipped.
+		publish(t, rabbitmq.RoutingKeyBannerMaterialize, []byte(`{"eventId":"skipped-category-barrier"}`))
 		dead, ok := testutils.GetOneFromQueue(t, MQ, dlqName, 30*time.Second)
 		require.True(t, ok)
-		assert.Contains(t, string(dead.Body), `"category":"trial"`)
-		assertDeadLettered(t, dead)
+		assert.Contains(t, string(dead.Body), "skipped-category-barrier")
+		inst, err := lifecycle.GetInstance(domain)
+		require.NoError(t, err)
+		trial, err := banner.Stored(inst, banner.CategoryTrial)
+		require.NoError(t, err)
+		assert.Nil(t, trial)
+
 	})
 }
 

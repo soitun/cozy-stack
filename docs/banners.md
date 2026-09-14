@@ -32,7 +32,7 @@ Publish JSON on the `platform` exchange, consumed by `stack.banner.commands`.
 The routing key selects the operation:
 
 - `banner.materialize`: create or replace the banner in a category.
-- `banner.clear`: delete the banner in a category; nonempty presentation fields
+- `banner.clear`: expire the banner in a category while retaining its revision; nonempty presentation fields
   are rejected.
 
 See [RabbitMQ configuration](rabbitmq.md#configuration) for queue declarations
@@ -102,10 +102,21 @@ Any complete publisher-supplied locale is supported, independently of the
 stack's translation catalogs.
 
 On an instance language change, existing banners are re-localized from retained
-commands without republishing. Deleted banners and older records without
-retained wording are left unchanged.
+commands in the banner documents without republishing. Cleared or deleted
+banners and older records without retained wording are left unchanged.
 
 ### Revisions and recovery
+
+Commanded banners store `revision`, `eventId`, and the full localized command
+in `accepted` alongside their presentation. A clear retains the category's
+document with `cleared: true`, an expired `endsAt`, and no retained wording;
+clients must filter out banners whose validity window has ended. A newer
+materialize replaces it normally. Updating the command revision also updates
+the document revision, even when its visible wording is unchanged.
+
+These fields use the same app permissions as the banner. Apps recording a
+dismissal should preserve the other fields and use the current CouchDB `_rev`;
+editing or deleting the ordering state can allow stale commands to be replayed.
 
 - Revisions at or below the last accepted revision for an instance and category
   are ignored, even after a clear. Only a changed decision needs a new revision;

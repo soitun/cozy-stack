@@ -157,7 +157,10 @@ func TestBannerCommandHandler(t *testing.T) {
 		require.NotNil(t, stored(t))
 
 		require.NoError(t, handle(t, rabbitmq.RoutingKeyBannerClear, fixture(t, "clear", 2)))
-		require.Nil(t, stored(t))
+		require.NotNil(t, stored(t))
+		require.True(t, stored(t).Cleared)
+		require.NotNil(t, stored(t).EndsAt)
+		assert.True(t, stored(t).EndsAt.Before(time.Now()))
 	})
 
 	t.Run("a payload that does not parse fails", func(t *testing.T) {

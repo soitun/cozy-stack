@@ -55,7 +55,7 @@ func TestCommandPartialFanoutRetriesStorageFailure(t *testing.T) {
 	require.NotNil(t, before)
 	assert.Nil(t, storedBanner(t, members[1]))
 	assert.Nil(t, storedBanner(t, members[2]))
-	retained, err := storedCommand(members[1], CategoryBilling)
+	retained, err := Stored(members[1], CategoryBilling)
 	require.NoError(t, err)
 	require.Nil(t, retained, "nothing is recorded for a member whose banner was not written")
 	require.NoError(t, ApplyCommand(cmd))
@@ -77,16 +77,16 @@ func TestCommandClearRetriesProjectionFailure(t *testing.T) {
 	t.Cleanup(func() { client.Transport = original })
 	var failed atomic.Bool
 	client.Transport = commandRoundTripper(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/banner-billing") && failed.CompareAndSwap(false, true) {
-			return nil, errors.New("simulated delete outage")
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/banner-billing") && failed.CompareAndSwap(false, true) {
+			return nil, errors.New("simulated clear outage")
 		}
 		return original.RoundTrip(r)
 	})
 	clear := clearCommand(t, inst, 2)
-	require.ErrorContains(t, ApplyCommand(clear), "simulated delete outage")
-	retained, err := storedCommand(inst, CategoryBilling)
+	require.ErrorContains(t, ApplyCommand(clear), "simulated clear outage")
+	retained, err := Stored(inst, CategoryBilling)
 	require.NoError(t, err)
-	require.False(t, retained.Clear, "the clear is only recorded once the document is gone")
+	require.False(t, retained.Cleared, "a failed clear must leave the previous decision intact")
 	require.Equal(t, int64(1), retained.Revision)
 	require.NoError(t, ApplyCommand(old))
 	require.NoError(t, ApplyCommand(clear))

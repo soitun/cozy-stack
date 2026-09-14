@@ -1,6 +1,7 @@
 package banner
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/cozy/cozy-stack/pkg/consts"
@@ -37,7 +38,7 @@ func Merge(fresh, stored *Banner) *Banner {
 	}
 	merged.DocID = stored.DocID
 	merged.DocRev = stored.DocRev
-	if stored.BannerID == fresh.BannerID {
+	if !stored.Cleared && !fresh.Cleared && stored.BannerID == fresh.BannerID {
 		merged.DismissedAt = stored.DismissedAt
 		// Carrying the start forward must not invert a window the producer
 		// just shortened to end before the occurrence began.
@@ -134,7 +135,11 @@ func stamp(b *Banner, now time.Time) {
 // and DismissedAt are excluded because Merge takes them from the stored
 // document, and Source.At because it moves on every evaluation by design.
 func changed(fresh, stored *Banner) bool {
-	return fresh.BannerID != stored.BannerID ||
+	return fresh.Revision != stored.Revision ||
+		fresh.EventID != stored.EventID ||
+		fresh.Cleared != stored.Cleared ||
+		!reflect.DeepEqual(fresh.Accepted, stored.Accepted) ||
+		fresh.BannerID != stored.BannerID ||
 		fresh.Category != stored.Category ||
 		fresh.Severity != stored.Severity ||
 		fresh.Surface != stored.Surface ||
@@ -177,7 +182,8 @@ func ctaChanged(fresh, stored *CTA) bool {
 }
 
 // Stored returns the banner materialized for a category, or nil when there is
-// none. A missing database is the first call on a fresh instance.
+// none. Cleared commands remain as expired documents to retain ordering.
+// A missing database is the first call on a fresh instance.
 func Stored(db prefixer.Prefixer, category string) (*Banner, error) {
 	var doc Banner
 	err := couchdb.GetDoc(db, consts.Banners, docID(category), &doc)
