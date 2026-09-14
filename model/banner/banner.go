@@ -7,6 +7,7 @@
 package banner
 
 import (
+	"maps"
 	"time"
 
 	"github.com/cozy/cozy-stack/pkg/consts"
@@ -78,6 +79,13 @@ type Banner struct {
 	EndsAt       *time.Time `json:"endsAt,omitempty"`
 	Source       Source     `json:"source"`
 
+	// Command state shares the document's ordinary app permissions. A clear
+	// expires the banner instead of deleting its ordering history.
+	Revision int64    `json:"revision,omitempty"`
+	EventID  string   `json:"eventId,omitempty"`
+	Cleared  bool     `json:"cleared,omitempty"`
+	Accepted *Command `json:"accepted,omitempty"`
+
 	Metadata *metadata.CozyMetadata `json:"cozyMetadata,omitempty"`
 }
 
@@ -110,6 +118,30 @@ func (b *Banner) clone() *Banner {
 	if b.EndsAt != nil {
 		at := *b.EndsAt
 		cloned.EndsAt = &at
+	}
+	if b.Accepted != nil {
+		cmd := *b.Accepted
+		cmd.Title = maps.Clone(cmd.Title)
+		cmd.Text = maps.Clone(cmd.Text)
+		if cmd.CTA != nil {
+			cta := *cmd.CTA
+			cta.Label = maps.Clone(cta.Label)
+			cmd.CTA = &cta
+		}
+		if cmd.SecondaryCTA != nil {
+			cta := *cmd.SecondaryCTA
+			cta.Label = maps.Clone(cta.Label)
+			cmd.SecondaryCTA = &cta
+		}
+		if cmd.StartsAt != nil {
+			at := *cmd.StartsAt
+			cmd.StartsAt = &at
+		}
+		if cmd.EndsAt != nil {
+			at := *cmd.EndsAt
+			cmd.EndsAt = &at
+		}
+		cloned.Accepted = &cmd
 	}
 	if b.Metadata != nil {
 		cloned.Metadata = b.Metadata.Clone()

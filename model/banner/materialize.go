@@ -1,6 +1,7 @@
 package banner
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/cozy/cozy-stack/pkg/consts"
@@ -23,8 +24,13 @@ func docID(category string) string { return "banner-" + category }
 
 // Merge carries a client written dismissal forward: re-materializing the same
 // occurrence must not resurrect a banner the user has already closed, and only
-// a new BannerID clears it. StartsAt is carried the same way, so it stays the
-// moment the occurrence began rather than the last re-evaluation.
+// a new BannerID clears it.
+//
+// A nil StartsAt means the producer stated no window, and the moment the
+// occurrence began is carried forward instead of moving to this evaluation.
+// A producer that states a window owns it: a command moving its own start has
+// to replace the stored one, or extending a window applies the new end and
+// keeps the old start, which is neither window the producer asked for.
 func Merge(fresh, stored *Banner) *Banner {
 	merged := fresh.clone()
 	if stored == nil {
@@ -32,9 +38,12 @@ func Merge(fresh, stored *Banner) *Banner {
 	}
 	merged.DocID = stored.DocID
 	merged.DocRev = stored.DocRev
-	if stored.BannerID == fresh.BannerID {
+	if !stored.Cleared && !fresh.Cleared && stored.BannerID == fresh.BannerID {
 		merged.DismissedAt = stored.DismissedAt
-		if stored.StartsAt != nil {
+		// Carrying the start forward must not invert a window the producer
+		// just shortened to end before the occurrence began.
+		if fresh.StartsAt == nil && stored.StartsAt != nil &&
+			(fresh.EndsAt == nil || stored.StartsAt.Before(*fresh.EndsAt)) {
 			at := *stored.StartsAt
 			merged.StartsAt = &at
 		}
@@ -64,6 +73,15 @@ func Materialize(db prefixer.Prefixer, category string, fresh *Banner, now time.
 
 	merged := Merge(fresh, stored)
 	merged.Category = category
+	// A producer that stated no window starts when it decided: the evaluation
+	// time for a rule, the decision time for a command.
+	if merged.StartsAt == nil {
+		at := merged.Source.At
+		if at.IsZero() {
+			at = now
+		}
+		merged.StartsAt = &at
+	}
 	ensureEscapable(merged)
 	stamp(merged, now)
 
@@ -117,7 +135,11 @@ func stamp(b *Banner, now time.Time) {
 // and DismissedAt are excluded because Merge takes them from the stored
 // document, and Source.At because it moves on every evaluation by design.
 func changed(fresh, stored *Banner) bool {
-	return fresh.BannerID != stored.BannerID ||
+	return fresh.Revision != stored.Revision ||
+		fresh.EventID != stored.EventID ||
+		fresh.Cleared != stored.Cleared ||
+		!reflect.DeepEqual(fresh.Accepted, stored.Accepted) ||
+		fresh.BannerID != stored.BannerID ||
 		fresh.Category != stored.Category ||
 		fresh.Severity != stored.Severity ||
 		fresh.Surface != stored.Surface ||
@@ -160,7 +182,8 @@ func ctaChanged(fresh, stored *CTA) bool {
 }
 
 // Stored returns the banner materialized for a category, or nil when there is
-// none. A missing database is the first call on a fresh instance.
+// none. Cleared commands remain as expired documents to retain ordering.
+// A missing database is the first call on a fresh instance.
 func Stored(db prefixer.Prefixer, category string) (*Banner, error) {
 	var doc Banner
 	err := couchdb.GetDoc(db, consts.Banners, docID(category), &doc)
