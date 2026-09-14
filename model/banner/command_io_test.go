@@ -22,7 +22,7 @@ type commandRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f commandRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestCommandPartialFanoutRetriesStorageFailure(t *testing.T) {
+func TestCommandFanoutContinuesAfterStorageFailures(t *testing.T) {
 	config.UseTestFile(t)
 	testutils.NeedCouchdb(t)
 	useCommandContexts(t)
@@ -34,18 +34,22 @@ func TestCommandPartialFanoutRetriesStorageFailure(t *testing.T) {
 	require.NoError(t, couchdb.UpdateDoc(prefixer.GlobalPrefixer, first))
 	newInstance(t, commandContext, "fr", org)
 	newInstance(t, commandContext, "en", org)
+	newInstance(t, commandContext, "en", org)
 	members, err := lifecycle.ListOrgInstancesByID(org)
 	require.NoError(t, err)
-	require.Len(t, members, 3)
+	require.Len(t, members, 4)
 	cmd := fixture(t, "organization")
 	cmd.Tenant = org
-	failPath := "/" + couchdb.EscapeCouchdbName(members[1].DBPrefix()+"/"+consts.Banners) + "/banner-billing"
+	failures := map[string]*atomic.Bool{}
+	for _, inst := range members[1:3] {
+		path := "/" + couchdb.EscapeCouchdbName(inst.DBPrefix()+"/"+consts.Banners) + "/banner-billing"
+		failures[path] = &atomic.Bool{}
+	}
 	client := config.CouchClient()
 	original := client.Transport
 	t.Cleanup(func() { client.Transport = original })
-	var failed atomic.Bool
 	client.Transport = commandRoundTripper(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodGet && r.URL.Path == failPath && failed.CompareAndSwap(false, true) {
+		if failed := failures[r.URL.Path]; r.Method == http.MethodGet && failed != nil && failed.CompareAndSwap(false, true) {
 			return nil, errors.New("simulated projection outage")
 		}
 		return original.RoundTrip(r)
@@ -53,18 +57,26 @@ func TestCommandPartialFanoutRetriesStorageFailure(t *testing.T) {
 	err = banner.ApplyCommand(cmd)
 	require.ErrorContains(t, err, "simulated projection outage")
 	assert.NotErrorIs(t, err, banner.ErrInvalidCommand)
+	for _, inst := range members[1:3] {
+		assert.ErrorContains(t, err, inst.Domain, "every failed member must be reported")
+	}
 	before := storedBanner(t, members[0])
 	require.NotNil(t, before)
 	assert.Nil(t, storedBanner(t, members[1]))
 	assert.Nil(t, storedBanner(t, members[2]))
-	retained, err := banner.Stored(members[1], banner.CategoryBilling)
-	require.NoError(t, err)
-	require.Nil(t, retained, "nothing is recorded for a member whose banner was not written")
+	last := storedBanner(t, members[3])
+	require.NotNil(t, last, "failures must not block later members")
+	for _, inst := range members[1:3] {
+		retained, err := banner.Stored(inst, banner.CategoryBilling)
+		require.NoError(t, err)
+		require.Nil(t, retained, "a failed member must not advance its revision")
+	}
 	require.NoError(t, banner.ApplyCommand(cmd))
 	for _, inst := range members {
 		require.NotNil(t, storedBanner(t, inst))
 	}
 	assert.Equal(t, before.DocRev, storedBanner(t, members[0]).DocRev)
+	assert.Equal(t, last.DocRev, storedBanner(t, members[3]).DocRev)
 }
 
 func TestCommandClearRetriesProjectionFailure(t *testing.T) {

@@ -101,12 +101,13 @@ func ApplyCommand(cmd Command) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, inst := range instances {
 		if err := cmd.applyTo(inst); err != nil {
-			return fmt.Errorf("%s: %w", inst.Domain, err)
+			errs = append(errs, fmt.Errorf("%s: %w", inst.Domain, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // targets resolves what the backend addressed. An organization with no

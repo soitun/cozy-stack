@@ -24,7 +24,9 @@ counters need separate categories. `quota` is reserved for the stack's rules.
 
 Instances that disable banners or disallow the category are skipped; other
 eligible recipients still receive the command. Skipping an instance leaves its
-existing documents and recorded revision unchanged.
+existing documents and recorded revision unchanged. An error on one instance
+does not stop processing the others. The stack returns all failures after
+attempting every recipient, so delivery can be retried.
 
 ### Commands
 
