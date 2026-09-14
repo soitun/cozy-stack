@@ -22,7 +22,7 @@ contexts:
 
 Broker credentials, permissions and bindings control who can publish. Each
 category must have one owner and one addressing mode: the stack keeps one
-revision per instance and category, shared by `tenant` and `workplaceFqdn`
+revision per instance and category, shared by `orgId` and `workplaceFqdn`
 commands, so never address a category both ways. `quota` is reserved for the
 stack's rules.
 
@@ -81,7 +81,7 @@ and [shared fixtures](../model/banner/testdata) for complete examples.
 | Field | Required | Contract |
 | --- | --- | --- |
 | `category` | always | Matches `^[a-z][a-z0-9-]{0,31}$`; `quota` is rejected. |
-| `workplaceFqdn` / `tenant` | exactly one | A single instance host name / a B2B organization ID matching instance `org_id`, whose members receive the command; `tenant` is at most 256 bytes with no surrounding whitespace. |
+| `workplaceFqdn` / `orgId` | exactly one | A single instance host name / a B2B organization ID matching instance `org_id`, whose members receive the command; `orgId` is at most 256 bytes with no surrounding whitespace. |
 | `revision` | always | Positive counter, increasing per category. |
 | `timestamp` | always | Decision time in positive epoch seconds, within the RFC3339 range. Does not order commands. |
 | `eventId` | no | Correlation ID, at most 256 bytes. |

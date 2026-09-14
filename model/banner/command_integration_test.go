@@ -494,7 +494,7 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 	orgCommand := func(t *testing.T, orgID string, revision int64) banner.Command {
 		t.Helper()
 		cmd := fixture(t, "organization")
-		cmd.Tenant = orgID
+		cmd.OrgID = orgID
 		cmd.Revision = revision
 		return cmd
 	}
@@ -519,7 +519,7 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 		assert.Nil(t, storedBanner(t, other), "a matching organization domain must not select another tenant")
 
 		clear := orgCommand(t, orgID, 8)
-		clear = banner.Command{Category: clear.Category, Tenant: clear.Tenant, Revision: clear.Revision, Timestamp: clear.Timestamp, Clear: true}
+		clear = banner.Command{Category: clear.Category, OrgID: clear.OrgID, Revision: clear.Revision, Timestamp: clear.Timestamp, Clear: true}
 		require.NoError(t, banner.ApplyCommand(clear))
 		assert.Nil(t, storedBanner(t, first))
 		assert.Nil(t, storedBanner(t, second))

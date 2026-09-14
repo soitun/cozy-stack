@@ -39,7 +39,7 @@ func TestFixturesAreTheContract(t *testing.T) {
 		cmd := fixture(t, "materialize")
 
 		assert.Equal(t, "alice.twake.app", cmd.WorkplaceFqdn)
-		assert.Empty(t, cmd.Tenant)
+		assert.Empty(t, cmd.OrgID)
 		assert.Equal(t, "banner-command-42", cmd.EventID)
 		assert.Equal(t, int64(42), cmd.Revision)
 		assert.Equal(t, int64(decidedAt), cmd.Timestamp)
@@ -68,10 +68,10 @@ func TestFixturesAreTheContract(t *testing.T) {
 		assert.NoError(t, cmd.validate())
 	})
 
-	t.Run("an organization is addressed by its tenant ID", func(t *testing.T) {
+	t.Run("an organization is addressed by its org ID", func(t *testing.T) {
 		cmd := fixture(t, "organization")
 
-		assert.Equal(t, "acme_org:123", cmd.Tenant)
+		assert.Equal(t, "acme_org:123", cmd.OrgID)
 		assert.Empty(t, cmd.WorkplaceFqdn)
 		assert.Equal(t, SurfaceModal, cmd.Surface)
 		assert.NoError(t, cmd.validate())
@@ -113,11 +113,11 @@ func TestValidateRejections(t *testing.T) {
 		{"category starting with a digit", func(c *Command) { c.Category = "2fa" }, "not a valid category"},
 		{"category too long", func(c *Command) { c.Category = strings.Repeat("a", 33) }, "not a valid category"},
 		{"the quota category", func(c *Command) { c.Category = CategoryQuota }, "reserved for the stack's own rules"},
-		{"no target", func(c *Command) { c.WorkplaceFqdn = "" }, "exactly one of tenant and workplaceFqdn"},
-		{"both targets", func(c *Command) { c.Tenant = "acme.example" }, "exactly one of tenant and workplaceFqdn"},
-		{"tenant too long", func(c *Command) { c.WorkplaceFqdn = ""; c.Tenant = strings.Repeat("a", maxTenantLen+1) }, "tenant must be at most"},
-		{"blank tenant", func(c *Command) { c.WorkplaceFqdn = ""; c.Tenant = " " }, "no surrounding whitespace"},
-		{"tenant with surrounding whitespace", func(c *Command) { c.WorkplaceFqdn = ""; c.Tenant = " acme" }, "no surrounding whitespace"},
+		{"no target", func(c *Command) { c.WorkplaceFqdn = "" }, "exactly one of orgId and workplaceFqdn"},
+		{"both targets", func(c *Command) { c.OrgID = "acme.example" }, "exactly one of orgId and workplaceFqdn"},
+		{"orgId too long", func(c *Command) { c.WorkplaceFqdn = ""; c.OrgID = strings.Repeat("a", maxOrgIDLen+1) }, "orgId must be at most"},
+		{"blank orgId", func(c *Command) { c.WorkplaceFqdn = ""; c.OrgID = " " }, "no surrounding whitespace"},
+		{"orgId with surrounding whitespace", func(c *Command) { c.WorkplaceFqdn = ""; c.OrgID = " acme" }, "no surrounding whitespace"},
 		{"a target with a path", func(c *Command) { c.WorkplaceFqdn = "alice.twake.app/../bob" }, "is not a valid target"},
 		{"a target with a scheme", func(c *Command) { c.WorkplaceFqdn = "https://alice.twake.app" }, "is not a valid target"},
 		{"a target too long", func(c *Command) { c.WorkplaceFqdn = strings.Repeat("a", 256) }, "is not a valid target"},
@@ -208,7 +208,7 @@ func TestValidateRejections(t *testing.T) {
 			{"oversized event id", func(c *Command) { c.EventID = strings.Repeat("e", maxEventIDLen+1) }, "eventId is longer than"},
 			{"oversized wording", func(c *Command) { c.Text = Localized{"en": strings.Repeat("x", 2<<20)} }, "clear must not carry presentation"},
 			{"ordinary wording", func(c *Command) { c.Text = Localized{"en": "ignored?"} }, "clear must not carry presentation"},
-			{"no target", func(c *Command) { c.WorkplaceFqdn = "" }, "exactly one of tenant and workplaceFqdn"},
+			{"no target", func(c *Command) { c.WorkplaceFqdn = "" }, "exactly one of orgId and workplaceFqdn"},
 			{"the quota category", func(c *Command) { c.Category = CategoryQuota }, "reserved"},
 		} {
 			cmd := clear()

@@ -39,15 +39,15 @@ type CommandCTA struct {
 type Command struct {
 	Category string `json:"category"`
 
-	// Exactly one of Tenant and WorkplaceFqdn is set. Tenant is the B2B
+	// Exactly one of OrgID and WorkplaceFqdn is set. OrgID is the B2B
 	// organization ID, and every instance under it gets the banner.
-	Tenant        string `json:"tenant,omitempty"`
+	OrgID         string `json:"orgId,omitempty"`
 	WorkplaceFqdn string `json:"workplaceFqdn,omitempty"`
 
 	// EventID is the backend's correlation id, logged for traceability.
 	EventID string `json:"eventId,omitempty"`
 	// Revision is a positive counter the backend increments per category. The
-	// stack stores one per instance and category, shared by tenant and
+	// stack stores one per instance and category, shared by organization and
 	// workplace commands. Delivery is at-least-once and unordered, so this
 	// (not the arrival time) orders a command against what is stored.
 	Revision int64 `json:"revision"`
@@ -86,7 +86,7 @@ const (
 	maxURLLen     = 2048
 	maxPriority   = 1000
 	maxEventIDLen = 256
-	maxTenantLen  = 256
+	maxOrgIDLen   = 256
 	maxLocaleLen  = 35
 	// MaxCommandBytes bounds the JSON body at the transport boundary.
 	MaxCommandBytes = 256 * 1024
@@ -116,10 +116,10 @@ func ApplyCommand(cmd Command) error {
 // instance is a no-op. A missing workplace is retryable (not invalid): the
 // stack cannot tell a deleted instance from one still being provisioned.
 func (cmd Command) targets() ([]*instance.Instance, error) {
-	if cmd.Tenant != "" {
-		list, err := lifecycle.ListOrgInstancesByID(cmd.Tenant)
+	if cmd.OrgID != "" {
+		list, err := lifecycle.ListOrgInstancesByID(cmd.OrgID)
 		if err != nil {
-			return nil, fmt.Errorf("cannot list the instances of organization %s: %w", cmd.Tenant, err)
+			return nil, fmt.Errorf("cannot list the instances of organization %s: %w", cmd.OrgID, err)
 		}
 		return list, nil
 	}
@@ -263,11 +263,11 @@ func (cmd Command) validate() error {
 		return fmt.Errorf("%w: the %s category is reserved for the stack's own rules",
 			ErrInvalidCommand, CategoryQuota)
 	}
-	if (cmd.Tenant == "") == (cmd.WorkplaceFqdn == "") {
-		return fmt.Errorf("%w: exactly one of tenant and workplaceFqdn is required", ErrInvalidCommand)
+	if (cmd.OrgID == "") == (cmd.WorkplaceFqdn == "") {
+		return fmt.Errorf("%w: exactly one of orgId and workplaceFqdn is required", ErrInvalidCommand)
 	}
-	if cmd.Tenant != "" && (len(cmd.Tenant) > maxTenantLen || strings.TrimSpace(cmd.Tenant) != cmd.Tenant) {
-		return fmt.Errorf("%w: tenant must be at most %d bytes with no surrounding whitespace", ErrInvalidCommand, maxTenantLen)
+	if cmd.OrgID != "" && (len(cmd.OrgID) > maxOrgIDLen || strings.TrimSpace(cmd.OrgID) != cmd.OrgID) {
+		return fmt.Errorf("%w: orgId must be at most %d bytes with no surrounding whitespace", ErrInvalidCommand, maxOrgIDLen)
 	}
 	if cmd.WorkplaceFqdn != "" && !targetFormat.MatchString(cmd.WorkplaceFqdn) {
 		return fmt.Errorf("%w: %q is not a valid target", ErrInvalidCommand, cmd.WorkplaceFqdn)

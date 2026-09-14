@@ -39,7 +39,7 @@ func TestCommandFanoutContinuesAfterStorageFailures(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, members, 4)
 	cmd := fixture(t, "organization")
-	cmd.Tenant = org
+	cmd.OrgID = org
 	failures := map[string]*atomic.Bool{}
 	for _, inst := range members[1:3] {
 		path := "/" + couchdb.EscapeCouchdbName(inst.DBPrefix()+"/"+consts.Banners) + "/banner-billing"
