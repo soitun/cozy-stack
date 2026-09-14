@@ -109,9 +109,11 @@ func TestBannerCommandHandler(t *testing.T) {
 	previous := conf.Contexts
 	conf.Contexts = map[string]interface{}{
 		contextName: map[string]interface{}{
-			"enable_banners":            true,
-			"banner_command_categories": []interface{}{"billing"},
-			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			"banner": map[string]interface{}{
+				"enabled":            true,
+				"command_categories": []interface{}{"billing"},
+				"cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			},
 		},
 	}
 	t.Cleanup(func() { conf.Contexts = previous })

@@ -55,7 +55,7 @@ func refreshQuotaAt(domain string, used int64) error {
 	}
 	// Off by default. Turning the switch back off stops the writes but leaves
 	// the documents already materialized: a rollback needs a cleanup too.
-	if !inst.HasBannersEnabled() {
+	if !inst.BannerSettings().Enabled {
 		return nil
 	}
 
@@ -110,7 +110,7 @@ func refreshCommandsAt(domain string) error {
 	if err != nil {
 		return err
 	}
-	if !inst.HasBannersEnabled() {
+	if !inst.BannerSettings().Enabled {
 		return nil
 	}
 

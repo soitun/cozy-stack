@@ -535,22 +535,25 @@ contexts:
     # Feature flags
     features:
       - hide_konnector_errors
-    # Materialize the platform banners (io.cozy.banners) for the instances of
-    # this context. Off by default, so the rules can ship before the clients
-    # that render them. Turning it back off stops the writes and leaves the
-    # documents already materialized in place.
-    enable_banners: true
-    # The banner categories the stack.banner.commands queue is allowed to
-    # write. Its publisher is authenticated by its broker credentials and
-    # bindings, so this says what it may say, not who it is. The quota
-    # category is always refused: the stack measures disk usage itself.
+    # Platform banners (io.cozy.banners) for the instances of this context.
     # See docs/banners.md.
-    banner_command_categories:
-      - billing
-      - trial
-    # The hosts a banner command's call to action may link to.
-    banner_cta_hosts:
-      - manager.example.org
+    banner:
+      # Off by default, so the rules can ship before the clients that render
+      # them. Turning it back off stops the writes and leaves the documents
+      # already materialized in place.
+      enabled: true
+      # The categories the stack.banner.commands queue is allowed to write, or
+      # "*" for all of them. Its publisher is authenticated by its broker
+      # credentials and bindings, so this says what it may say, not who it
+      # is. The quota category is always refused: the stack measures disk
+      # usage itself.
+      command_categories:
+        - billing
+        - trial
+      # The hosts a banner command's call to action may link to. There is no
+      # wildcard.
+      cta_hosts:
+        - manager.example.org
     # List of applications that can be automatically updated even if the
     # permissions have changed
     additional_platform_apps:

@@ -131,7 +131,7 @@ func (cmd Command) targets() ([]*instance.Instance, error) {
 }
 
 func (cmd Command) applyTo(inst *instance.Instance) error {
-	if !inst.HasBannersEnabled() {
+	if !inst.BannerSettings().Enabled {
 		return nil
 	}
 	if reason := cmd.refusal(inst); reason != "" {
@@ -163,15 +163,16 @@ func (cmd Command) applyTo(inst *instance.Instance) error {
 // refusal says why the instance's context does not accept the command, or ""
 // when it does.
 func (cmd Command) refusal(inst *instance.Instance) string {
-	if !inst.AllowsBannerCategory(cmd.Category) {
-		return "category not in banner_command_categories"
+	settings := inst.BannerSettings()
+	if !settings.AllowsCategory(cmd.Category) {
+		return "category not in banner.command_categories"
 	}
 	for _, cta := range []*CommandCTA{cmd.CTA, cmd.SecondaryCTA} {
 		if cta == nil {
 			continue
 		}
-		if host := ctaHost(cta.URL); !inst.AllowsBannerCTAHost(host) {
-			return fmt.Sprintf("CTA host %q not in banner_cta_hosts", host)
+		if host := ctaHost(cta.URL); !settings.AllowsCTAHost(host) {
+			return fmt.Sprintf("CTA host %q not in banner.cta_hosts", host)
 		}
 	}
 	return ""

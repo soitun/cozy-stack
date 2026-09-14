@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/cozy/cozy-stack/pkg/logger"
 	"github.com/cozy/cozy-stack/pkg/prefixer"
 	"github.com/cozy/cozy-stack/pkg/realtime"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/afero"
 )
@@ -889,45 +891,40 @@ func (i *Instance) MovedError() *jsonapi.Error {
 	return &jerr
 }
 
-// HasBannersEnabled reports whether platform banners are materialized for this
-// instance. Off unless the context turns it on, so the rules can ship before
-// the clients that render them.
-func (i *Instance) HasBannersEnabled() bool {
-	if ctxSettings, ok := i.SettingsContext(); ok {
-		if enabled, ok := ctxSettings["enable_banners"].(bool); ok {
-			return enabled
-		}
-	}
-	return false
+// BannerSettings is the banner block of a context's settings.
+type BannerSettings struct {
+	// Enabled materializes platform banners for the instance. Off unless the
+	// context turns it on, so the rules can ship before the clients that
+	// render them.
+	Enabled bool `mapstructure:"enabled"`
+	// CommandCategories are the categories the banner command queue may
+	// write. "*" allows every category the command validation accepts.
+	CommandCategories []string `mapstructure:"command_categories"`
+	// CTAHosts are the hosts a banner command's call to action may link to.
+	// There is no wildcard: it would let a command send users anywhere.
+	CTAHosts []string `mapstructure:"cta_hosts"`
 }
 
-// AllowsBannerCategory reports whether the context settings allow the banner
-// command queue to write a category on this instance.
-func (i *Instance) AllowsBannerCategory(category string) bool {
-	return i.contextListHas("banner_command_categories", category)
-}
-
-// AllowsBannerCTAHost reports whether the context settings allow a banner
-// command's call to action to link to this host.
-func (i *Instance) AllowsBannerCTAHost(host string) bool {
-	return i.contextListHas("banner_cta_hosts", host)
-}
-
-func (i *Instance) contextListHas(key, value string) bool {
+// BannerSettings returns the banner block of the instance's context. A missing
+// or malformed block leaves banners off.
+func (i *Instance) BannerSettings() BannerSettings {
+	var settings BannerSettings
 	ctxSettings, ok := i.SettingsContext()
-	if !ok {
-		return false
+	if !ok || mapstructure.Decode(ctxSettings["banner"], &settings) != nil {
+		return BannerSettings{}
 	}
-	list, ok := ctxSettings[key].([]interface{})
-	if !ok {
-		return false
-	}
-	for _, item := range list {
-		if s, ok := item.(string); ok && s == value {
-			return true
-		}
-	}
-	return false
+	return settings
+}
+
+// AllowsCategory reports whether the banner command queue may write a category.
+func (s BannerSettings) AllowsCategory(category string) bool {
+	return slices.Contains(s.CommandCategories, "*") || slices.Contains(s.CommandCategories, category)
+}
+
+// AllowsCTAHost reports whether a banner command's call to action may link to
+// this host.
+func (s BannerSettings) AllowsCTAHost(host string) bool {
+	return slices.Contains(s.CTAHosts, host)
 }
 
 func (i *Instance) HasPremiumLinksEnabled() bool {

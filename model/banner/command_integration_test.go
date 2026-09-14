@@ -58,12 +58,14 @@ func useCommandContexts(t *testing.T) {
 	previous := conf.Contexts
 	conf.Contexts = map[string]interface{}{
 		commandContext: map[string]interface{}{
-			"enable_banners":            true,
-			"banner_command_categories": []interface{}{banner.CategoryBilling, banner.CategoryTrial},
-			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			"banner": map[string]interface{}{
+				"enabled":            true,
+				"command_categories": []interface{}{banner.CategoryBilling, banner.CategoryTrial},
+				"cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			},
 		},
 		refusedContext: map[string]interface{}{
-			"enable_banners": true,
+			"banner": map[string]interface{}{"enabled": true},
 		},
 		noBannerContext: map[string]interface{}{},
 	}
@@ -554,12 +556,14 @@ func TestApplyCommandToAnOrganization(t *testing.T) {
 
 		conf := config.GetConfig()
 		conf.Contexts[refusedContext] = map[string]interface{}{
-			"enable_banners":            true,
-			"banner_command_categories": []interface{}{banner.CategoryBilling},
-			"banner_cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			"banner": map[string]interface{}{
+				"enabled":            true,
+				"command_categories": []interface{}{banner.CategoryBilling},
+				"cta_hosts":          []interface{}{"manager.example.org", "twake.app"},
+			},
 		}
 		t.Cleanup(func() {
-			conf.Contexts[refusedContext] = map[string]interface{}{"enable_banners": true}
+			conf.Contexts[refusedContext] = map[string]interface{}{"banner": map[string]interface{}{"enabled": true}}
 		})
 
 		// Replay reaches a previously skipped member after its context allows
