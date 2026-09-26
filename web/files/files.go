@@ -432,7 +432,25 @@ func CopyFile(c echo.Context, inst *instance.Instance, sharedDrive *sharing.Shar
 // It is used to duplicate the given file and its metadata except for
 // relationships.
 func FileCopyHandler(c echo.Context) error {
-	return CopyFile(c, middlewares.GetInstance(c), nil)
+	inst := middlewares.GetInstance(c)
+
+	// A copy exposes the source content at the destination, so it needs read
+	// access on the source. CopyFile only checks POST on the copy, whose
+	// DirID is the caller-supplied destination: on its own that lets a token
+	// holding POST on one folder copy, then read, any file of the instance.
+	//
+	// Shared drives reach CopyFile through their own guard, which already
+	// checks effective GET on the source, hence the check sitting here rather
+	// than in CopyFile.
+	olddoc, err := inst.VFS().FileByID(c.Param("file-id"))
+	if err != nil {
+		return WrapVfsError(err)
+	}
+	if err := checkPerm(c, permission.GET, nil, olddoc); err != nil {
+		return err
+	}
+
+	return CopyFile(c, inst, nil)
 }
 
 // ModifyMetadataByIDHandler handles PATCH requests on /files/:file-id

@@ -1060,6 +1060,65 @@ func TestFiles(t *testing.T) {
 		attrs.ValueEqual("name", copyName)
 	})
 
+	t.Run("CopyFileWithoutReadOnSource", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		// A file the restricted token has no access to.
+		secretID := e.POST("/files/").
+			WithQuery("Name", "copy-source-out-of-scope").
+			WithQuery("Type", "file").
+			WithHeader("Content-Type", "text/plain").
+			WithHeader("Authorization", "Bearer "+token).
+			WithBytes([]byte("secret content")).
+			Expect().Status(201).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object().Path("$.data.id").String().NotEmpty().Raw()
+
+		// The only folder the restricted token may write to.
+		dropDirID := e.POST("/files/").
+			WithQuery("Name", "copy-drop-folder").
+			WithQuery("Type", "directory").
+			WithHeader("Authorization", "Bearer "+token).
+			Expect().Status(201).
+			JSON(httpexpect.ContentOpts{MediaType: "application/vnd.api+json"}).
+			Object().Path("$.data.id").String().NotEmpty().Raw()
+
+		dropToken, err := testInstance.MakeJWT(consts.ShareAudience, "drop", "io.cozy.files", "", time.Now())
+		require.NoError(t, err)
+
+		rules := permission.Set{
+			permission.Rule{
+				Type:   "io.cozy.files",
+				Verbs:  permission.Verbs(permission.GET, permission.POST),
+				Values: []string{dropDirID},
+			},
+		}
+		expires := time.Now().Add(2 * time.Minute)
+		_, err = permission.CreateShareSet(
+			testInstance,
+			&permission.Permission{Type: "app", Permissions: rules},
+			"", map[string]string{"drop": dropToken}, nil,
+			permission.Permission{Permissions: rules}, &expires, false,
+		)
+		require.NoError(t, err)
+
+		// The token may write into the folder, which is what makes the copy
+		// destination legitimate.
+		e.POST("/files/"+dropDirID).
+			WithQuery("Name", "own-upload").
+			WithQuery("Type", "file").
+			WithHeader("Content-Type", "text/plain").
+			WithHeader("Authorization", "Bearer "+dropToken).
+			WithBytes([]byte("mine")).
+			Expect().Status(201)
+
+		// It must not be able to pull an out-of-scope file into it.
+		e.POST("/files/"+secretID+"/copy").
+			WithQuery("DirID", dropDirID).
+			WithHeader("Authorization", "Bearer "+dropToken).
+			Expect().Status(403)
+	})
+
 	t.Run("ModifyMetadataByPath", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
