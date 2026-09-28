@@ -58,6 +58,36 @@ func TestData(t *testing.T) {
 			ValueEqual("test", "testvalue")
 	})
 
+	t.Run("GetWithRevisions", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			scope  string
+			status int
+		}{
+			{"Unauthenticated", "", 401},
+			{"WrongDoctype", "io.cozy.anothertype", 403},
+			{"WriteOnly", Type + ":PUT", 403},
+			{"WrongDocument", Type + ":GET:another-id", 403},
+			{"WholeDoctype", Type + ":GET", 200},
+			{"DocumentID", Type + ":GET:" + ID, 200},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := testutils.CreateTestClient(t, ts.URL)
+				req := e.GET("/data/"+Type+"/"+ID).WithQuery("revs", "true")
+				if tc.scope != "" {
+					_, scopedToken := setup.GetTestClient(tc.scope)
+					req.WithHeader("Authorization", "Bearer "+scopedToken)
+				}
+				resp := req.Expect().Status(tc.status)
+				if tc.status == 200 {
+					obj := resp.JSON().Object()
+					obj.ValueEqual("_id", ID).ValueEqual("test", "testvalue")
+					obj.Value("_revisions").Object().Value("ids").Array().NotEmpty()
+				}
+			})
+		}
+	})
+
 	t.Run("GetForMissingDoc", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 

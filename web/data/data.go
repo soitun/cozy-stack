@@ -123,6 +123,9 @@ func getDoc(c echo.Context) error {
 	}
 
 	if paramIsTrue(c, "revs") {
+		if err := middlewares.AllowTypeAndID(c, permission.GET, doctype, docid); err != nil {
+			return err
+		}
 		return proxy(c, docid)
 	}
 
